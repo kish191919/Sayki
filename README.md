@@ -16,6 +16,7 @@ npm run dev          # http://localhost:3000
 | 변수 | 용도 |
 |---|---|
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (또는 `KV_REST_API_URL` / `KV_REST_API_TOKEN`) | 레슨 저장소(Upstash Redis). 없으면 로컬 파일(`./.data`)에 저장 — 로컬 개발 전용 |
+| `YOUTUBE_PROXY_URL` | 유튜브 요청에만 쓰는 회전형 주거용 프록시 (`http://아이디:비밀번호@호스트:포트`). Vercel 같은 데이터센터 IP는 유튜브에 차단되므로 배포 환경에서는 필수. 없으면 직접 요청(로컬 개발) |
 | `OPENAI_API_KEY` | 유튜브가 아닌 영상/오디오 링크(.mp4, .mp3 …, 25MB 이하)의 자막을 Whisper로 자동 생성. 없으면 자막 파일(.srt/.vtt) 업로드 필요 |
 | `SAYKI_DATA_DIR` | 로컬 파일 저장 위치 (기본 `./.data`) |
 
@@ -24,8 +25,9 @@ npm run dev          # http://localhost:3000
 1. [vercel.com/new](https://vercel.com/new)에서 GitHub 저장소 `kish191919/Sayki`를 Import → 설정 그대로 Deploy
 2. 프로젝트 → **Storage** → **Upstash for Redis**(Marketplace, 무료 플랜) 생성 → 이 프로젝트에 Connect
    - `KV_REST_API_URL`, `KV_REST_API_TOKEN` 환경 변수가 자동으로 추가됩니다.
-3. **Deployments** → 최신 배포 → **Redeploy** (환경 변수는 재배포해야 적용됨)
-4. (선택) **Settings → Environment Variables**에 `OPENAI_API_KEY` 추가
+3. **Settings → Environment Variables**에 `YOUTUBE_PROXY_URL` 추가 (회전형 **주거용** 프록시. 데이터센터·고정 IP 프록시는 유튜브에 막힘)
+4. (선택) `OPENAI_API_KEY` 추가
+5. **Deployments** → 최신 배포 → **Redeploy** (환경 변수는 재배포해야 적용됨)
 
 이후 `main` 브랜치에 푸시하면 자동으로 배포됩니다. Redis를 연결하지 않으면 레슨 만들기가 "서버 저장소가 아직 연결되지 않았어요" 오류를 냅니다.
 
@@ -70,7 +72,7 @@ src/
 
 ## 알려진 한계
 
-- **자막 수집 방식**: 유튜브 자막은 공식 Data API가 아닌 유튜브 앱 내부 API로 가져옵니다. 유튜브 정책상 회색 지대이고, 예고 없이 막히거나 서버 IP가 차단될 수 있습니다(자동 번역 요청은 이미 자주 429로 막힘). 특히 Vercel 같은 데이터센터 IP는 유튜브의 봇 확인에 걸리기 쉽습니다 — 이때 `YOUTUBE_BLOCKED` 오류가 나고, 자막 파일 업로드로는 계속 연습할 수 있습니다. 서비스 전에 법률 검토가 필요합니다.
+- **자막 수집 방식**: 유튜브 자막은 공식 Data API가 아닌 유튜브 앱 내부 API로 가져옵니다. 유튜브 정책상 회색 지대이고, 예고 없이 막히거나 서버 IP가 차단될 수 있습니다(자동 번역 요청은 이미 자주 429로 막힘). Vercel(AWS) IP는 유튜브 봇 확인에 항상 걸려서(`YOUTUBE_BLOCKED`), 유튜브 요청만 `YOUTUBE_PROXY_URL`의 회전형 주거용 프록시로 보냅니다. 막히면 새 IP로 재시도하지만 프록시 IP도 차단될 수 있습니다. 자막 파일 업로드는 프록시 없이도 동작합니다. 서비스 전에 법률 검토가 필요합니다.
 - **저장소**: 레슨만 Redis에 저장합니다(무료 플랜 256MB ≈ 레슨 수천 개). 사용자 계정·학습 기록용 DB는 아직 없습니다.
 - **채점**: 브라우저 음성 인식 결과와 원문을 비교하는 방식이라 음소 단위 발음 평가는 아닙니다. Firefox는 음성 인식을 지원하지 않습니다(녹음·비교 듣기는 가능).
 - **계정 없음**: 진도는 브라우저에만 저장됩니다.

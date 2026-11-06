@@ -2,6 +2,7 @@ import { LessonError } from "./errors";
 import { interpolateWords } from "./segment";
 import { cleanCaptionText, isAnnotationToken } from "./text";
 import type { CaptionOrigin, Cue, Word } from "./types";
+import { usingProxy, youtubeFetch, type YouTubeResponse } from "./youtube-fetch";
 
 const PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
 
@@ -89,18 +90,21 @@ export async function fetchVideoInfo(videoId: string): Promise<VideoInfo> {
   let sawRateLimit = false;
   let sawUnavailable = false;
 
-  for (const client of CLIENTS) {
+  // Through a rotating proxy each attempt gets a new exit IP, so a blocked
+  // IP is worth retrying; directly, one pass over the clients is enough.
+  const sequence = usingProxy() ? [...CLIENTS, ...CLIENTS] : CLIENTS;
+
+  for (const client of sequence) {
     let outcome: Attempt = "network";
     let data: PlayerResponse | null = null;
     try {
-      const res = await fetch(PLAYER_ENDPOINT, {
+      const res = await youtubeFetch(PLAYER_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json", "User-Agent": client.userAgent },
         body: JSON.stringify({ context: { client: { ...client.context, hl: "en", gl: "US" } }, videoId }),
-        signal: AbortSignal.timeout(15_000),
       });
       if (res.status === 429) outcome = "rate-limit";
-      else if (res.ok) data = (await res.json()) as PlayerResponse;
+      else if (res.ok) data = JSON.parse(res.text) as PlayerResponse;
     } catch {
       outcome = "network";
     }
@@ -160,11 +164,11 @@ export async function fetchVideoInfo(videoId: string): Promise<VideoInfo> {
 export async function fetchBasicVideoInfo(videoId: string): Promise<VideoInfo> {
   let title = "유튜브 영상";
   try {
-    const res = await fetch(
+    const res = await youtubeFetch(
       `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`,
-      { signal: AbortSignal.timeout(10_000) },
+      { timeoutMs: 10_000 },
     );
-    if (res.ok) title = ((await res.json()) as { title?: string }).title?.trim() || title;
+    if (res.ok) title = (JSON.parse(res.text) as { title?: string }).title?.trim() || title;
   } catch {
     /* keep the generic title */
   }
@@ -262,21 +266,26 @@ export async function fetchTrackCues(track: CaptionTrack, translateTo?: string):
   url.searchParams.set("fmt", "json3");
   if (translateTo) url.searchParams.set("tlang", translateTo);
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      headers: { "User-Agent": track.userAgent ?? CLIENTS[0].userAgent },
-      signal: AbortSignal.timeout(20_000),
-    });
-  } catch {
-    throw new LessonError("CAPTION_NETWORK", "자막을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.", 502);
+  // Through a rotating proxy, a refused request is retried once on a new IP.
+  const tries = usingProxy() ? 2 : 1;
+  let res: YouTubeResponse | null = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      res = await youtubeFetch(url, {
+        headers: { "User-Agent": track.userAgent ?? CLIENTS[0].userAgent },
+        timeoutMs: 20_000,
+      });
+    } catch {
+      res = null;
+    }
+    if (res?.ok && res.text) break;
   }
-  if (res.status === 429) {
+
+  if (res?.status === 429) {
     throw new LessonError("YOUTUBE_RATE_LIMIT", "유튜브 요청이 많아 잠시 막혔어요. 몇 분 뒤에 다시 시도해 주세요.", 503);
   }
-  const body = res.ok ? await res.text() : "";
-  if (!body) {
+  if (!res?.ok || !res.text) {
     throw new LessonError("CAPTION_NETWORK", "자막을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.", 502);
   }
-  return json3ToCues(JSON.parse(body) as Json3);
+  return json3ToCues(JSON.parse(res.text) as Json3);
 }
