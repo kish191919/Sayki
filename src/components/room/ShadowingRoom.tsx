@@ -25,6 +25,7 @@ import {
   type WaitMode,
 } from "@/lib/progress";
 import { scoreAttempt, scoreTone, type Attempt } from "@/lib/score";
+import { pendingAiLines } from "@/lib/translation-state";
 import type { Lesson } from "@/lib/types";
 import { MediaPlayer, YouTubePlayer, type PlayerHandle } from "./players";
 import { speechRecognitionSupported, useRecorder } from "./useRecorder";
@@ -98,17 +99,23 @@ function hintFor(text: string) {
     .join(" ");
 }
 
-async function requestTranslation(lessonId: string): Promise<string[]> {
+type Translation = { ko: string[]; pending: number };
+
+async function requestTranslation(lessonId: string): Promise<Translation> {
   const res = await fetch(`/api/lessons/${lessonId}/translate`, { method: "POST" });
-  const data = (await res.json().catch(() => ({}))) as { ko?: string[]; error?: string };
+  const data = (await res.json().catch(() => ({}))) as Partial<Translation> & { error?: string };
   if (!res.ok || !Array.isArray(data.ko)) throw new Error(data.error ?? "번역하지 못했어요.");
-  return data.ko;
+  return { ko: data.ko, pending: data.pending ?? 0 };
 }
+
+/** Status after a translation response: partial results get a retry link. */
+const translatedState = ({ pending }: Translation): TranslateState =>
+  pending > 0 ? { status: "error", message: `${pending}문장은 번역하지 못했어요.` } : { status: "idle" };
 
 export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson; canTranslate: boolean }) {
   const { sentences } = lesson;
   const total = sentences.length;
-  const needsTranslation = canTranslate && lesson.koreanOrigin !== "ai";
+  const needsTranslation = canTranslate && pendingAiLines(lesson).length > 0;
 
   const playerRef = useRef<PlayerHandle>(null);
   const listRef = useRef<HTMLOListElement>(null);
@@ -331,10 +338,10 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     if (!needsTranslation) return;
     let cancelled = false;
     requestTranslation(lesson.id).then(
-      (ko) => {
+      (t) => {
         if (cancelled) return;
-        setKoAi(ko);
-        setTranslate({ status: "idle" });
+        setKoAi(t.ko);
+        setTranslate(translatedState(t));
       },
       (e: Error) => {
         if (!cancelled) setTranslate({ status: "error", message: e.message });
@@ -348,9 +355,9 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const retryTranslation = () => {
     setTranslate({ status: "working" });
     requestTranslation(lesson.id).then(
-      (ko) => {
-        setKoAi(ko);
-        setTranslate({ status: "idle" });
+      (t) => {
+        setKoAi(t.ko);
+        setTranslate(translatedState(t));
       },
       (e: Error) => setTranslate({ status: "error", message: e.message }),
     );

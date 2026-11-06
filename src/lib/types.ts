@@ -47,6 +47,10 @@ export type Lesson = {
   thumbnail: string | null;
   sentences: Sentence[];
   createdAt: string;
+  /** AI translation only: sentence indexes the model has not translated yet. */
+  aiPending?: number[];
+  /** AI translation only: how many translation passes have run. */
+  aiAttempts?: number;
 };
 
 export type LessonSummary = Omit<Lesson, "sentences"> & {
