@@ -32,14 +32,6 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
               <SaykiMark />
               Sayki
             </Link>
-            <nav className="ml-auto flex items-center gap-1 text-sm font-semibold">
-              <Link href="/#how" className="rounded-full px-3 py-2 text-muted hover:text-ink">
-                사용법
-              </Link>
-              <Link href="/#start" className="rounded-full bg-ink px-4 py-2 text-bg hover:opacity-90">
-                레슨 만들기
-              </Link>
-            </nav>
           </div>
         </header>
 

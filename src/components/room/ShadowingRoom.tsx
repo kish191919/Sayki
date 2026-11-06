@@ -4,6 +4,7 @@ import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "rea
 import {
   CompareIcon,
   EyeIcon,
+  EyeOffIcon,
   HeadphonesIcon,
   LoopIcon,
   MicIcon,
@@ -145,7 +146,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const [wait, setWait] = useState<{ key: number; ms: number } | null>(null);
   const [tries, setTries] = useState<Record<string, Try>>({});
   const [revealed, setRevealed] = useState<number | null>(null);
-  const [answerShown, setAnswerShown] = useState<number | null>(null);
+  /** Sentences whose English answer is open this session (Korean → English mode). */
+  const [answerShown, setAnswerShown] = useState<ReadonlySet<number>>(() => new Set());
   const [hintShown, setHintShown] = useState<number | null>(null);
   const [koAi, setKoAi] = useState<string[] | null>(null);
   const [translate, setTranslate] = useState<TranslateState>({ status: needsTranslation ? "working" : "idle" });
@@ -234,6 +236,23 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     setCurrent(clamp(i));
   };
 
+  const setAnswer = (i: number, show: boolean) =>
+    setAnswerShown((prev) => {
+      if (prev.has(i) === show) return prev;
+      const next = new Set(prev);
+      if (show) next.add(i);
+      else next.delete(i);
+      return next;
+    });
+
+  /** The hint is for an answer still hidden, so asking for it closes the answer again. */
+  const toggleHint = () => {
+    if (answerShown.has(current)) {
+      setAnswer(current, false);
+      setHintShown(current);
+    } else setHintShown((h) => (h === current ? null : current));
+  };
+
   const switchMode = (mode: PracticeMode) => {
     if (mode === settings.mode || recorder.status !== "idle") return;
     pause();
@@ -241,11 +260,23 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     update({ mode });
   };
 
+  /** "이 문장 반복": switching it on starts the current sentence right away. */
+  const toggleLoop = () => {
+    if (speak) return;
+    const loop = !settings.loop;
+    update({ loop });
+    if (loop && !playing && !wait) play(current);
+    else if (!loop && settings.waitMode === "manual") clearWait();
+  };
+
   // Timers outlive the render that created them; route them through a ref
-  // so they always call the latest `play`.
-  const playLatest = useRef<typeof play | null>(null);
+  // so they act on the latest settings (e.g. loop switched off mid-countdown).
+  const afterWaitLatest = useRef<((i: number) => void) | null>(null);
   useEffect(() => {
-    playLatest.current = play;
+    afterWaitLatest.current = (i) => {
+      if (settings.loop) play(i);
+      else if (settings.waitMode !== "manual" && i + 1 < total) play(i + 1);
+    };
   });
 
   const finishSegment = () => {
@@ -256,17 +287,17 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     const after = e.afterEnd;
     e.afterEnd = null;
     if (after) return after();
-    if (e.once || settings.waitMode === "manual" || settings.waitMode === "continuous") return;
+    if (e.once || settings.waitMode === "continuous") return;
+    // "문장마다 멈춤" stops here — unless looping, which replays after a pause to speak in.
+    if (!settings.loop && (settings.waitMode === "manual" || i + 1 >= total)) return;
 
     const factor = settings.waitMode === "auto15" ? 1.5 : 1;
     const spoken = (sentences[i].end - sentences[i].start) / settings.rate;
     const ms = Math.max(1200, spoken * factor * 1000);
-    const next = settings.loop ? i : i + 1;
-    if (next >= total) return;
     setWait({ key: Date.now(), ms });
     e.waitTimer = setTimeout(() => {
       setWait(null);
-      playLatest.current?.(next);
+      afterWaitLatest.current?.(i);
     }, ms);
   };
 
@@ -294,9 +325,18 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       return;
     }
 
+    const start = startOf(e.index);
+    const end = endOf(e.index);
+    if (!e.armed) {
+      if ((t >= start - 0.6 && t < end - 0.05) || performance.now() > e.armDeadline) e.armed = true;
+      else return;
+    }
+
     if (e.mode === "continuous") {
-      if (settings.loop && t >= endOf(e.index) - 0.03) {
-        p.seek(startOf(e.index));
+      // Looping holds this sentence — the next one often starts right where it
+      // ends, so following `indexAt` would drift onward — unless the learner scrubbed away.
+      if (settings.loop && t > start - 1.5 && t < end + 1.5) {
+        if (t >= end - 0.03) p.seek(start);
         return;
       }
       const j = indexAt(t);
@@ -307,12 +347,6 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       return;
     }
 
-    const start = startOf(e.index);
-    const end = endOf(e.index);
-    if (!e.armed) {
-      if ((t >= start - 0.6 && t < end - 0.05) || performance.now() > e.armDeadline) e.armed = true;
-      else return;
-    }
     if (t < start - 1.5 || t > end + 1.5) {
       // The learner scrubbed the timeline.
       const j = indexAt(t);
@@ -396,11 +430,12 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
         recognitionError: result.recognitionError,
       },
     }));
+    // Open the answer to compare against, even when the speech wasn't recognised.
+    if (mode === "speak") setAnswer(i, true);
     if (!attempt) return;
     const setter = mode === "speak" ? setBestSpeak : setBest;
     setter((prev) => ((prev[i] ?? -1) >= attempt.score ? prev : { ...prev, [i]: attempt.score }));
-    if (mode === "speak") setAnswerShown(i);
-    else setRevealed(i);
+    if (mode !== "speak") setRevealed(i);
   };
 
   const compare = (i: number) => {
@@ -480,11 +515,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
         break;
       case "l":
       case "L":
-        if (!speak) update({ loop: !settings.loop });
+        toggleLoop();
         break;
       case "h":
       case "H":
-        if (speak) setHintShown((h) => (h === current ? null : current));
+        if (speak) toggleHint();
         break;
     }
   });
@@ -510,7 +545,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const recording = recorder.status === "recording" || recorder.status === "starting";
   const busy = recorder.status !== "idle";
   const waitHint = WAIT_MODES.find((m) => m.value === settings.waitMode)?.hint;
-  const answerVisible = answerShown === current || Boolean(attemptState);
+  const answerVisible = answerShown.has(current);
   const speakUnavailable = !hasKorean && translate.status !== "working";
 
   const englishLine = attempt
@@ -547,24 +582,6 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
-      {/* Mode switch */}
-      <div className="flex flex-wrap items-center gap-3 lg:col-span-2">
-        <ModeSwitch value={settings.mode} onChange={switchMode} speakDisabled={speakUnavailable} />
-        {translate.status === "working" && (
-          <span className="inline-flex items-center gap-2 text-xs font-semibold text-muted">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> AI가 문장별 한글 해석을 만드는 중…
-          </span>
-        )}
-        {translate.status === "error" && (
-          <span className="text-xs text-bad">
-            {translate.message}{" "}
-            <button type="button" className="font-semibold underline" onClick={retryTranslation}>
-              다시 시도
-            </button>
-          </span>
-        )}
-      </div>
-
       <section className="min-w-0 space-y-4">
         {/* Video — height-capped on desktop so the practice controls stay on screen. */}
         <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-sm lg:max-h-[max(18rem,calc(100dvh_-_34rem))]">
@@ -602,17 +619,34 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 
         {/* Current sentence */}
         <div className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
-          <div className="mb-3 flex items-center justify-between gap-3 text-sm">
-            <span className="font-semibold text-muted">
-              문장 <span className="text-ink">{current + 1}</span> / {total}
-              <span className="ml-2 font-normal tabular-nums">{formatTime(sentence.start)}</span>
-            </span>
-            {modeBest[current] != null && (
-              <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE_BG[scoreTone(modeBest[current])]}`}>
-                {speak ? `최고 일치율 ${modeBest[current]}%` : `최고 ${modeBest[current]}점`}
+          {/* Mode switch sits with the controls so it stays on screen while practising. */}
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-semibold text-muted">
+                문장 <span className="text-ink">{current + 1}</span> / {total}
+                <span className="ml-2 font-normal tabular-nums">{formatTime(sentence.start)}</span>
               </span>
-            )}
+              {modeBest[current] != null && (
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE_BG[scoreTone(modeBest[current])]}`}>
+                  {speak ? `최고 일치율 ${modeBest[current]}%` : `최고 ${modeBest[current]}점`}
+                </span>
+              )}
+            </div>
+            <ModeSwitch value={settings.mode} onChange={switchMode} speakDisabled={speakUnavailable} />
           </div>
+          {translate.status === "working" && (
+            <p className="-mt-2 mb-3 flex items-center gap-2 text-xs font-semibold text-muted">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> AI가 문장별 한글 해석을 만드는 중…
+            </p>
+          )}
+          {translate.status === "error" && (
+            <p className="-mt-2 mb-3 text-xs text-bad">
+              {translate.message}{" "}
+              <button type="button" className="font-semibold underline" onClick={retryTranslation}>
+                다시 시도
+              </button>
+            </p>
+          )}
 
           {speak ? (
             <>
@@ -681,39 +715,40 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
             <IconButton label="이전 문장 (←)" onClick={() => goTo(current - 1)} disabled={!ready || current === 0}>
               <PrevIcon />
             </IconButton>
+            <button
+              type="button"
+              onClick={() => (playing ? pause() : play(current))}
+              disabled={!ready || busy}
+              className="inline-flex h-12 items-center gap-2 rounded-full bg-ink px-5 font-semibold text-bg transition hover:opacity-90 disabled:opacity-40"
+              aria-label={playing ? "일시정지 (Space)" : "문장 듣기 (Space)"}
+            >
+              {playing ? <PauseIcon /> : <PlayIcon />}
+              {playing ? "일시정지" : "듣기"}
+            </button>
+            <IconButton label="다음 문장 (→)" onClick={() => goTo(current + 1)} disabled={!ready || current >= total - 1}>
+              <NextIcon />
+            </IconButton>
             {speak ? (
               <>
                 <IconButton
                   label="힌트: 단어 첫 글자 (H)"
-                  onClick={() => setHintShown((h) => (h === current ? null : current))}
-                  active={hintShown === current}
-                  disabled={answerVisible}
+                  onClick={toggleHint}
+                  active={hintShown === current && !answerVisible}
                 >
                   <span className="text-sm font-bold">힌트</span>
                 </IconButton>
-                <IconButton label="정답 보기" onClick={() => setAnswerShown(current)} disabled={answerVisible}>
-                  <EyeIcon />
+                <IconButton
+                  label={answerVisible ? "정답 숨기기" : "정답 보기"}
+                  onClick={() => setAnswer(current, !answerVisible)}
+                  active={answerVisible}
+                >
+                  {answerVisible ? <EyeOffIcon /> : <EyeIcon />}
                 </IconButton>
               </>
             ) : (
-              <button
-                type="button"
-                onClick={() => (playing ? pause() : play(current))}
-                disabled={!ready || busy}
-                className="inline-flex h-12 items-center gap-2 rounded-full bg-ink px-5 font-semibold text-bg transition hover:opacity-90 disabled:opacity-40"
-                aria-label={playing ? "일시정지 (Space)" : "문장 듣기 (Space)"}
-              >
-                {playing ? <PauseIcon /> : <PlayIcon />}
-                {playing ? "일시정지" : "듣기"}
-              </button>
-            )}
-            <IconButton label="다음 문장 (→)" onClick={() => goTo(current + 1)} disabled={!ready || current >= total - 1}>
-              <NextIcon />
-            </IconButton>
-            {!speak && (
               <IconButton
                 label={settings.loop ? "반복 끄기 (L)" : "이 문장 반복 (L)"}
-                onClick={() => update({ loop: !settings.loop })}
+                onClick={toggleLoop}
                 active={settings.loop}
               >
                 <LoopIcon />
@@ -723,7 +758,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
           </div>
 
           {/* Result */}
-          {(recording || attemptState || recorder.error || (speak && answerVisible)) && (
+          {(recording || attemptState || recorder.error) && (
             <div className="mt-4 rounded-xl bg-surface-2 p-4 text-sm">
               {recorder.error ? (
                 <p className="font-semibold text-bad">{recorder.error}</p>
@@ -772,11 +807,6 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                     </p>
                   )}
                   <div className="flex flex-wrap gap-2">
-                    {speak && (
-                      <SmallButton onClick={() => play(current, { once: true })} disabled={!ready}>
-                        <PlayIcon size={16} /> 원어민 듣기
-                      </SmallButton>
-                    )}
                     {attemptState?.url && (
                       <>
                         <SmallButton onClick={() => playMine(current)}>
@@ -862,7 +892,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
           <p className="text-xs text-muted sm:col-span-2">
             {speak ? (
               <>
-                단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>H</Kbd> 힌트 · <Kbd>Space</Kbd> 원어민 듣기 · <Kbd>←</Kbd>{" "}
+                단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>H</Kbd> 힌트 · <Kbd>Space</Kbd> 듣기/멈춤 ·<Kbd>←</Kbd>{" "}
                 <Kbd>→</Kbd> 이전/다음
               </>
             ) : (
@@ -890,7 +920,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
               const score = modeBest[i];
               const active = i === current;
               const lineKo = koOf(i);
-              const englishOpen = !speak || score != null || answerShown === i || Boolean(tries[tryKey(i)]);
+              const englishOpen = !speak || answerShown.has(i);
               return (
                 <li key={i} data-index={i}>
                   <button
@@ -958,7 +988,7 @@ function ModeSwitch({
   speakDisabled: boolean;
 }) {
   return (
-    <div className="inline-flex rounded-xl bg-surface-2 p-1" role="tablist" aria-label="연습 방식">
+    <div className="flex w-full rounded-xl bg-surface-2 p-1 sm:inline-flex sm:w-auto" role="tablist" aria-label="연습 방식">
       {MODES.map((m) => {
         const disabled = m.value === "speak" && speakDisabled;
         return (
@@ -970,7 +1000,7 @@ function ModeSwitch({
             onClick={() => onChange(m.value)}
             disabled={disabled}
             title={disabled ? "한글 해석이 없는 영상이에요" : undefined}
-            className={`h-9 rounded-lg px-3 text-sm font-semibold transition disabled:opacity-40 sm:px-4 ${
+            className={`min-h-9 flex-1 break-keep rounded-lg px-3 py-1.5 text-sm font-semibold leading-tight transition disabled:opacity-40 sm:flex-none sm:px-4 ${
               value === m.value ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
             }`}
           >
