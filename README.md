@@ -15,6 +15,7 @@ npm run dev          # http://localhost:3000
 
 | 변수 | 용도 |
 |---|---|
+| `SAYKI_PASSWORD` | 사이트 전체 비밀번호 잠금(개인용). 배포 환경에서는 필수. 없으면 배포본은 모든 요청에 503을 돌려주고, 로컬 `npm run dev`는 잠금 없이 열림. 바꾸면 모든 기기가 로그아웃됨 |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (또는 `KV_REST_API_URL` / `KV_REST_API_TOKEN`) | 레슨 저장소(Upstash Redis). 없으면 로컬 파일(`./.data`)에 저장 — 로컬 개발 전용 |
 | `YOUTUBE_PROXY_URL` | 유튜브 요청에만 쓰는 회전형 주거용 프록시 (`http://아이디:비밀번호@호스트:포트`). Vercel 같은 데이터센터 IP는 유튜브에 차단되므로 배포 환경에서는 필수. 없으면 직접 요청(로컬 개발) |
 | `ANTHROPIC_API_KEY` | Claude로 문장별 한글 번역 생성 (한→영 말하기 모드에 필요). 레슨을 처음 열 때 한 번 번역해 저장 |
@@ -28,7 +29,7 @@ npm run dev          # http://localhost:3000
 1. [vercel.com/new](https://vercel.com/new)에서 GitHub 저장소 `kish191919/Sayki`를 Import → 설정 그대로 Deploy
 2. 프로젝트 → **Storage** → **Upstash for Redis**(Marketplace, 무료 플랜) 생성 → 이 프로젝트에 Connect
    - `KV_REST_API_URL`, `KV_REST_API_TOKEN` 환경 변수가 자동으로 추가됩니다.
-3. **Settings → Environment Variables**에 `YOUTUBE_PROXY_URL` 추가 (회전형 **주거용** 프록시. 데이터센터·고정 IP 프록시는 유튜브에 막힘)
+3. **Settings → Environment Variables**에 `SAYKI_PASSWORD`와 `YOUTUBE_PROXY_URL` 추가 (회전형 **주거용** 프록시. 데이터센터·고정 IP 프록시는 유튜브에 막힘)
 4. (선택) `OPENAI_API_KEY` 추가
 5. **Deployments** → 최신 배포 → **Redeploy** (환경 변수는 재배포해야 적용됨)
 
@@ -56,6 +57,7 @@ npm run dev          # http://localhost:3000
 
 ```
 src/
+  proxy.ts                   사이트 전체 비밀번호 잠금 (lib/auth.ts, app/login, api/auth/login)
   app/
     page.tsx                 홈 (링크 입력, 이어서 연습하기, 최근 레슨)
     lesson/[id]/page.tsx     레슨 페이지 (서버: 레슨 로드 → 클라이언트 연습실)
@@ -82,7 +84,7 @@ src/
 - **저장소**: 레슨만 Redis에 저장합니다(무료 플랜 256MB ≈ 레슨 수천 개). 사용자 계정·학습 기록용 DB는 아직 없습니다.
 - **채점**: 브라우저 음성 인식 결과와 원문을 비교하는 방식이라 음소 단위 발음 평가는 아닙니다. Firefox는 음성 인식을 지원하지 않습니다(녹음·비교 듣기는 가능).
 - **계정 없음**: 진도는 브라우저에만 저장됩니다.
-- **레이트 리밋 없음**: `/api/lessons`에 요청 제한이 없습니다.
+- **개인용 잠금**: `src/proxy.ts`가 페이지와 API 전체를 `SAYKI_PASSWORD` 하나로 잠급니다(로그인 시도는 IP당 15분에 10회). 로그인한 뒤에는 `/api/lessons`에 별도 요청 제한이 없습니다.
 
 ## 다음 단계 후보
 
