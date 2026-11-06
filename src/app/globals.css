@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --bg: #f7f6f2;
+  --surface: #ffffff;
+  --surface-2: #f0eee8;
+  --ink: #17181c;
+  --muted: #6b6d76;
+  --line: #e5e2da;
+  --accent: #ff5b3a;
+  --accent-strong: #e8462a;
+  --accent-soft: #ffece6;
+  --on-accent: #ffffff;
+  --good: #11885a;
+  --good-soft: #e1f4ea;
+  --warn: #b26f00;
+  --warn-soft: #fcf0d8;
+  --bad: #d13434;
+  --bad-soft: #fde6e6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #111215;
+    --surface: #1a1b1f;
+    --surface-2: #24252b;
+    --ink: #f3f2ee;
+    --muted: #9b9da6;
+    --line: #2e2f36;
+    --accent: #ff6a4b;
+    --accent-strong: #ff8468;
+    --accent-soft: #3a211b;
+    --on-accent: #ffffff;
+    --good: #43d394;
+    --good-soft: #16291f;
+    --warn: #f1b34b;
+    --warn-soft: #2f2615;
+    --bad: #ff7272;
+    --bad-soft: #351b1b;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui,
+    "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
+  --animate-countdown: countdown linear forwards;
+}
+
+@keyframes countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
