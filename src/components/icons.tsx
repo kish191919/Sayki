@@ -94,6 +94,11 @@ export const EyeOffIcon = (p: IconProps) => (
     <path d="m2 2 20 20" />
   </Svg>
 );
+export const ChevronDownIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m6 9 6 6 6-6" />
+  </Svg>
+);
 export const LinkIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" />

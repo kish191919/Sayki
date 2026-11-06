@@ -17,6 +17,10 @@ export type Settings = {
   showKorean: boolean;
   /** Subtitle timing offset in seconds (positive = subtitles later). */
   offset: number;
+  /** The "전체 문장" panel is expanded. */
+  sentencesOpen: boolean;
+  /** The playback settings panel (speed, sync, …) is expanded. */
+  settingsOpen: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -27,6 +31,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showText: true,
   showKorean: true,
   offset: 0,
+  sentencesOpen: true,
+  settingsOpen: false,
 };
 
 export type LessonProgress = {

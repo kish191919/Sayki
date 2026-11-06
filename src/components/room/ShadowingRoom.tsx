@@ -2,6 +2,7 @@
 
 import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import {
+  ChevronDownIcon,
   CompareIcon,
   EyeIcon,
   EyeOffIcon,
@@ -155,6 +156,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const recorder = useRecorder(meterRef);
 
   const speak = settings.mode === "speak";
+  /** Korean → English mode always goes sentence by sentence, whatever the wait mode says. */
+  const continuousPlay = !speak && settings.waitMode === "continuous";
   const update = (patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch }));
   const koOf = (i: number) => koAi?.[i] || sentences[i].ko || "";
   const hasKorean = koAi ? koAi.some(Boolean) : sentences.some((s) => s.ko);
@@ -206,9 +209,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     clearWait();
     stopMine();
     const e = engine.current;
-    // In Korean → English mode every sentence plays once: it is the answer.
-    e.once = Boolean(opts.once) || speak;
-    e.mode = !e.once && settings.waitMode === "continuous" ? "continuous" : "segment";
+    e.once = Boolean(opts.once);
+    e.mode = !e.once && continuousPlay ? "continuous" : "segment";
     e.index = idx;
     e.armed = false;
     e.armDeadline = performance.now() + 1500;
@@ -262,11 +264,10 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 
   /** "이 문장 반복": switching it on starts the current sentence right away. */
   const toggleLoop = () => {
-    if (speak) return;
     const loop = !settings.loop;
     update({ loop });
     if (loop && !playing && !wait) play(current);
-    else if (!loop && settings.waitMode === "manual") clearWait();
+    else if (!loop && (speak || settings.waitMode === "manual")) clearWait();
   };
 
   // Timers outlive the render that created them; route them through a ref
@@ -275,7 +276,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   useEffect(() => {
     afterWaitLatest.current = (i) => {
       if (settings.loop) play(i);
-      else if (settings.waitMode !== "manual" && i + 1 < total) play(i + 1);
+      // Never run on to the next sentence in Korean → English mode: its audio is the answer.
+      else if (!speak && settings.waitMode !== "manual" && i + 1 < total) play(i + 1);
     };
   });
 
@@ -287,11 +289,12 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     const after = e.afterEnd;
     e.afterEnd = null;
     if (after) return after();
-    if (e.once || settings.waitMode === "continuous") return;
-    // "문장마다 멈춤" stops here — unless looping, which replays after a pause to speak in.
-    if (!settings.loop && (settings.waitMode === "manual" || i + 1 >= total)) return;
+    if (e.once || continuousPlay) return;
+    // "문장마다 멈춤" stops here, and so does Korean → English mode (each sentence's audio
+    // is its answer) — unless looping, which replays after a pause to speak in.
+    if (!settings.loop && (speak || settings.waitMode === "manual" || i + 1 >= total)) return;
 
-    const factor = settings.waitMode === "auto15" ? 1.5 : 1;
+    const factor = !speak && settings.waitMode === "auto15" ? 1.5 : 1;
     const spoken = (sentences[i].end - sentences[i].start) / settings.rate;
     const ms = Math.max(1200, spoken * factor * 1000);
     setWait({ key: Date.now(), ms });
@@ -317,8 +320,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       let j = indexAt(t);
       if (t >= endOf(j) - 0.1 && j < total - 1) j += 1;
       clearWait();
-      e.once = speak;
-      e.mode = !e.once && settings.waitMode === "continuous" ? "continuous" : "segment";
+      e.once = false;
+      e.mode = continuousPlay ? "continuous" : "segment";
       e.index = j;
       e.armed = true;
       setCurrent(j);
@@ -472,13 +475,15 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     if (ready) playerRef.current?.setRate(settings.rate);
   }, [ready, settings.rate]);
 
+  // Keep the current sentence centred in the list — also when the list is expanded again.
+  const sentencesOpen = settings.sentencesOpen;
   useEffect(() => {
     const list = listRef.current;
     const item = list?.querySelector<HTMLElement>(`[data-index="${current}"]`);
-    if (!list || !item) return;
+    if (!sentencesOpen || !list || !item) return;
     const top = item.offsetTop - list.clientHeight / 2 + item.clientHeight / 2;
     list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-  }, [current]);
+  }, [current, sentencesOpen]);
 
   useEffect(() => {
     const e = engine.current;
@@ -544,7 +549,14 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     : null;
   const recording = recorder.status === "recording" || recorder.status === "starting";
   const busy = recorder.status !== "idle";
-  const waitHint = WAIT_MODES.find((m) => m.value === settings.waitMode)?.hint;
+  const waitMode = WAIT_MODES.find((m) => m.value === settings.waitMode);
+  const settingsSummary = [
+    `${settings.rate}x`,
+    !speak && waitMode?.label,
+    `자막 싱크 ${settings.offset > 0 ? "+" : ""}${settings.offset.toFixed(1)}초`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const answerVisible = answerShown.has(current);
   const speakUnavailable = !hasKorean && translate.status !== "working";
 
@@ -728,7 +740,14 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
             <IconButton label="다음 문장 (→)" onClick={() => goTo(current + 1)} disabled={!ready || current >= total - 1}>
               <NextIcon />
             </IconButton>
-            {speak ? (
+            <IconButton
+              label={settings.loop ? "반복 끄기 (L)" : "이 문장 반복 듣기 (L)"}
+              onClick={toggleLoop}
+              active={settings.loop}
+            >
+              <LoopIcon />
+            </IconButton>
+            {speak && (
               <>
                 <IconButton
                   label="힌트: 단어 첫 글자 (H)"
@@ -745,14 +764,6 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                   {answerVisible ? <EyeOffIcon /> : <EyeIcon />}
                 </IconButton>
               </>
-            ) : (
-              <IconButton
-                label={settings.loop ? "반복 끄기 (L)" : "이 문장 반복 (L)"}
-                onClick={toggleLoop}
-                active={settings.loop}
-              >
-                <LoopIcon />
-              </IconButton>
             )}
             {recordButton}
           </div>
@@ -829,147 +840,179 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
           )}
         </div>
 
-        {/* Settings */}
-        <div className="grid gap-4 rounded-2xl border border-line bg-surface p-5 text-sm shadow-sm sm:grid-cols-2">
-          <Field label="재생 속도">
-            <Segmented
-              options={RATES.map((r) => ({ value: r, label: `${r}x` }))}
-              value={settings.rate}
-              onChange={(rate) => update({ rate })}
-            />
-          </Field>
-          {!speak && (
-            <Field label="재생 방식" hint={waitHint}>
-              <select
-                value={settings.waitMode}
-                onChange={(e) => {
-                  clearWait();
-                  update({ waitMode: e.target.value as WaitMode });
-                }}
-                className="h-9 w-full rounded-lg border border-line bg-surface px-2 font-medium"
-              >
-                {WAIT_MODES.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          )}
-          {!speak && (
-            <Field label="자막 표시">
-              <div className="flex flex-wrap gap-2">
-                <Toggle checked={settings.showText} onChange={(showText) => update({ showText })}>
-                  영어 문장
-                </Toggle>
-                {hasKorean && (
-                  <Toggle checked={settings.showKorean} onChange={(showKorean) => update({ showKorean })}>
-                    한글 해석
-                  </Toggle>
-                )}
-              </div>
-            </Field>
-          )}
-          <Field label="자막 싱크" hint="문장이 소리보다 빠르거나 늦게 끊기면 조절하세요.">
-            <div className="flex items-center gap-2">
-              <SmallButton onClick={() => update({ offset: Math.round((settings.offset - 0.1) * 10) / 10 })}>
-                −0.1초
-              </SmallButton>
-              <span className="w-14 text-center font-semibold tabular-nums">
-                {settings.offset > 0 ? "+" : ""}
-                {settings.offset.toFixed(1)}초
-              </span>
-              <SmallButton onClick={() => update({ offset: Math.round((settings.offset + 0.1) * 10) / 10 })}>
-                +0.1초
-              </SmallButton>
-              {settings.offset !== 0 && (
-                <button type="button" className="text-muted underline" onClick={() => update({ offset: 0 })}>
-                  초기화
-                </button>
+        {/* Settings — collapsed to a one-line summary until opened. */}
+        <div className="overflow-hidden rounded-2xl border border-line bg-surface text-sm shadow-sm">
+          <button
+            type="button"
+            onClick={() => update({ settingsOpen: !settings.settingsOpen })}
+            aria-expanded={settings.settingsOpen}
+            aria-controls="room-settings"
+            className="flex w-full items-center gap-3 px-5 py-4 text-left transition hover:bg-surface-2"
+          >
+            <span className="shrink-0 font-semibold">재생 설정</span>
+            <span className="min-w-0 flex-1 truncate text-xs text-muted">{settingsSummary}</span>
+            <Chevron open={settings.settingsOpen} />
+          </button>
+          {settings.settingsOpen && (
+            <div id="room-settings" className="grid gap-4 border-t border-line p-5 sm:grid-cols-2">
+              <Field label="재생 속도">
+                <Segmented
+                  options={RATES.map((r) => ({ value: r, label: `${r}x` }))}
+                  value={settings.rate}
+                  onChange={(rate) => update({ rate })}
+                />
+              </Field>
+              {!speak && (
+                <Field label="재생 방식" hint={waitMode?.hint}>
+                  <select
+                    value={settings.waitMode}
+                    onChange={(e) => {
+                      clearWait();
+                      update({ waitMode: e.target.value as WaitMode });
+                    }}
+                    className="h-9 w-full rounded-lg border border-line bg-surface px-2 font-medium"
+                  >
+                    {WAIT_MODES.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
               )}
+              {!speak && (
+                <Field label="자막 표시">
+                  <div className="flex flex-wrap gap-2">
+                    <Toggle checked={settings.showText} onChange={(showText) => update({ showText })}>
+                      영어 문장
+                    </Toggle>
+                    {hasKorean && (
+                      <Toggle checked={settings.showKorean} onChange={(showKorean) => update({ showKorean })}>
+                        한글 해석
+                      </Toggle>
+                    )}
+                  </div>
+                </Field>
+              )}
+              <Field label="자막 싱크" hint="문장이 소리보다 빠르거나 늦게 끊기면 조절하세요.">
+                <div className="flex items-center gap-2">
+                  <SmallButton onClick={() => update({ offset: Math.round((settings.offset - 0.1) * 10) / 10 })}>
+                    −0.1초
+                  </SmallButton>
+                  <span className="w-14 text-center font-semibold tabular-nums">
+                    {settings.offset > 0 ? "+" : ""}
+                    {settings.offset.toFixed(1)}초
+                  </span>
+                  <SmallButton onClick={() => update({ offset: Math.round((settings.offset + 0.1) * 10) / 10 })}>
+                    +0.1초
+                  </SmallButton>
+                  {settings.offset !== 0 && (
+                    <button type="button" className="text-muted underline" onClick={() => update({ offset: 0 })}>
+                      초기화
+                    </button>
+                  )}
+                </div>
+              </Field>
+              <p className="text-xs text-muted sm:col-span-2">
+                {speak ? (
+                  <>
+                    단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>H</Kbd> 힌트 · <Kbd>Space</Kbd> 듣기/멈춤 ·<Kbd>←</Kbd>{" "}
+                    <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복
+                  </>
+                ) : (
+                  <>
+                    단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
+                  </>
+                )}
+                <span className="block sm:ml-1 sm:inline">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
+              </p>
             </div>
-          </Field>
-          <p className="text-xs text-muted sm:col-span-2">
-            {speak ? (
-              <>
-                단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>H</Kbd> 힌트 · <Kbd>Space</Kbd> 듣기/멈춤 ·<Kbd>←</Kbd>{" "}
-                <Kbd>→</Kbd> 이전/다음
-              </>
-            ) : (
-              <>
-                단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
-              </>
-            )}
-            <span className="block sm:ml-1 sm:inline">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
-          </p>
+          )}
         </div>
       </section>
 
       {/* Sentence list */}
       <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
-        <div className="rounded-2xl border border-line bg-surface shadow-sm">
-          <div className="flex items-center justify-between border-b border-line px-4 py-3">
-            <h2 className="font-bold">전체 문장</h2>
-            <span className="text-xs text-muted">
-              연습 {practicedCount}/{total}
-              {average != null && <> · 평균 {average}{speak ? "%" : "점"}</>}
-            </span>
-          </div>
-          <ol ref={listRef} className="relative max-h-[55vh] overflow-y-auto p-2 lg:max-h-[calc(100dvh-13rem)]">
-            {sentences.map((s, i) => {
-              const score = modeBest[i];
-              const active = i === current;
-              const lineKo = koOf(i);
-              const englishOpen = !speak || answerShown.has(i);
-              return (
-                <li key={i} data-index={i}>
-                  <button
-                    type="button"
-                    onClick={() => goTo(i)}
-                    disabled={!ready}
-                    className={`flex w-full gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
-                      active ? "bg-accent-soft" : "hover:bg-surface-2"
-                    }`}
-                  >
-                    <span className={`w-6 shrink-0 pt-0.5 text-xs tabular-nums ${active ? "font-bold text-accent" : "text-muted"}`}>
-                      {i + 1}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      {speak ? (
-                        <>
-                          <span className={`block break-keep leading-snug ${active ? "font-semibold" : ""}`}>
-                            {lineKo || <span className="text-muted">…</span>}
-                          </span>
-                          {englishOpen && (
-                            <span className="mt-0.5 block text-xs text-muted" lang="en">
+        <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+          <h2>
+            <button
+              type="button"
+              onClick={() => update({ sentencesOpen: !sentencesOpen })}
+              aria-expanded={sentencesOpen}
+              aria-controls="room-sentences"
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-surface-2"
+            >
+              <span className="font-bold">전체 문장</span>
+              <span className="flex items-center gap-2 text-xs text-muted">
+                <span>
+                  연습 {practicedCount}/{total}
+                  {average != null && <> · 평균 {average}{speak ? "%" : "점"}</>}
+                </span>
+                <Chevron open={sentencesOpen} />
+              </span>
+            </button>
+          </h2>
+          {sentencesOpen && (
+            <ol
+              id="room-sentences"
+              ref={listRef}
+              className="relative max-h-[55vh] overflow-y-auto border-t border-line p-2 lg:max-h-[calc(100dvh-13rem)]"
+            >
+              {sentences.map((s, i) => {
+                const score = modeBest[i];
+                const active = i === current;
+                const lineKo = koOf(i);
+                const englishOpen = !speak || answerShown.has(i);
+                return (
+                  <li key={i} data-index={i}>
+                    <button
+                      type="button"
+                      onClick={() => goTo(i)}
+                      disabled={!ready}
+                      className={`flex w-full gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
+                        active ? "bg-accent-soft" : "hover:bg-surface-2"
+                      }`}
+                    >
+                      <span className={`w-6 shrink-0 pt-0.5 text-xs tabular-nums ${active ? "font-bold text-accent" : "text-muted"}`}>
+                        {i + 1}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        {speak ? (
+                          <>
+                            <span className={`block break-keep leading-snug ${active ? "font-semibold" : ""}`}>
+                              {lineKo || <span className="text-muted">…</span>}
+                            </span>
+                            {englishOpen && (
+                              <span className="mt-0.5 block text-xs text-muted" lang="en">
+                                {s.text}
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <span
+                              className={`block leading-snug ${active ? "font-semibold" : ""} ${settings.showText ? "" : "blur-[3px]"}`}
+                              lang="en"
+                            >
                               {s.text}
                             </span>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <span
-                            className={`block leading-snug ${active ? "font-semibold" : ""} ${settings.showText ? "" : "blur-[3px]"}`}
-                            lang="en"
-                          >
-                            {s.text}
-                          </span>
-                          {hasKorean && settings.showKorean && lineKo && (
-                            <span className="mt-0.5 block break-keep text-xs text-muted">{lineKo}</span>
-                          )}
-                        </>
-                      )}
-                    </span>
-                    {score != null && (
-                      <span className={`h-fit shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${TONE_BG[scoreTone(score)]}`}>
-                        {score}
+                            {hasKorean && settings.showKorean && lineKo && (
+                              <span className="mt-0.5 block break-keep text-xs text-muted">{lineKo}</span>
+                            )}
+                          </>
+                        )}
                       </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
+                      {score != null && (
+                        <span className={`h-fit shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${TONE_BG[scoreTone(score)]}`}>
+                          {score}
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
         </div>
       </aside>
     </div>
@@ -1123,6 +1166,10 @@ function Toggle({
       {children}
     </button>
   );
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return <ChevronDownIcon size={18} className={`shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`} />;
 }
 
 function Kbd({ children }: { children: ReactNode }) {
