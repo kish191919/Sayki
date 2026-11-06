@@ -5,7 +5,11 @@
 
 export type WaitMode = "manual" | "auto1" | "auto15" | "continuous";
 
+/** shadow: listen, then repeat. speak: read the Korean, say the English. */
+export type PracticeMode = "shadow" | "speak";
+
 export type Settings = {
+  mode: PracticeMode;
   rate: number;
   waitMode: WaitMode;
   loop: boolean;
@@ -16,6 +20,7 @@ export type Settings = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
+  mode: "shadow",
   rate: 1,
   waitMode: "manual",
   loop: false,
@@ -25,7 +30,10 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 export type LessonProgress = {
+  /** Best shadowing score per sentence. */
   best: Record<number, number>;
+  /** Best match rate per sentence in Korean → English mode. */
+  bestSpeak: Record<number, number>;
   last: number;
 };
 
@@ -63,7 +71,7 @@ export const loadSettings = () => read<Settings>(SETTINGS_KEY, DEFAULT_SETTINGS)
 export const saveSettings = (s: Settings) => write(SETTINGS_KEY, s);
 
 export const loadProgress = (id: string) =>
-  read<LessonProgress>(progressKey(id), { best: {}, last: 0 });
+  read<LessonProgress>(progressKey(id), { best: {}, bestSpeak: {}, last: 0 });
 export const saveProgress = (id: string, p: LessonProgress) => write(progressKey(id), p);
 
 export function loadRecents(): RecentItem[] {

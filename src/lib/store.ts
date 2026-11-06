@@ -17,6 +17,8 @@ interface LessonStore {
   get(id: string): Promise<Lesson | null>;
   save(lesson: Lesson): Promise<void>;
   recent(limit: number): Promise<LessonSummary[]>;
+  /** Increments a counter that expires after `ttlSeconds`; returns the new value. */
+  bump(key: string, ttlSeconds: number): Promise<number>;
 }
 
 const ID_RE = /^(yt|md|up)_[A-Za-z0-9_-]{6,40}$/;
@@ -57,6 +59,10 @@ function redisStore(redis: Redis): LessonStore {
       if (ids.length === 0) return [];
       const summaries = await redis.mget<(LessonSummary | null)[]>(...ids.map(summaryKey));
       return summaries.filter((s): s is LessonSummary => s !== null);
+    },
+    async bump(key, ttlSeconds) {
+      const [count] = await redis.pipeline().incr(`counter:${key}`).expire(`counter:${key}`, ttlSeconds).exec<[number, number]>();
+      return count;
     },
   };
 }
@@ -100,8 +106,16 @@ function fileStore(dir: string): LessonStore {
       const lessons = await Promise.all(stats.slice(0, limit).map((s) => get(s.n.replace(/\.json$/, ""))));
       return lessons.filter((l): l is Lesson => l !== null).map(summarize);
     },
+    async bump(key) {
+      // Local development only: an in-memory counter is enough.
+      const count = (counters.get(key) ?? 0) + 1;
+      counters.set(key, count);
+      return count;
+    },
   };
 }
+
+const counters = new Map<string, number>();
 
 /* --------------------------------- Select --------------------------------- */
 
@@ -138,4 +152,8 @@ export async function saveLesson(lesson: Lesson): Promise<void> {
 
 export async function listRecentLessons(limit = 12): Promise<LessonSummary[]> {
   return store().recent(limit);
+}
+
+export async function bumpCounter(key: string, ttlSeconds: number): Promise<number> {
+  return store().bump(key, ttlSeconds);
 }

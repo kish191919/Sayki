@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import RoomLoader from "@/components/room/RoomLoader";
 import RoomSkeleton from "@/components/room/RoomSkeleton";
 import { getLesson } from "@/lib/store";
+import { canTranslate } from "@/lib/translate";
 import type { Lesson } from "@/lib/types";
 
 const CAPTION_LABEL: Record<Lesson["captionOrigin"], string> = {
@@ -16,6 +17,7 @@ const CAPTION_LABEL: Record<Lesson["captionOrigin"], string> = {
 const KOREAN_LABEL = {
   "youtube-manual": "한글 자막",
   "youtube-auto-translate": "한글 자동 번역",
+  ai: "한글 AI 번역",
 } as const;
 
 export async function generateMetadata({ params }: PageProps<"/lesson/[id]">): Promise<Metadata> {
@@ -63,7 +65,7 @@ async function LessonContent({ params }: { params: Promise<{ id: string }> }) {
           </p>
         )}
       </div>
-      <RoomLoader lesson={lesson} />
+      <RoomLoader lesson={lesson} canTranslate={canTranslate()} />
     </>
   );
 }

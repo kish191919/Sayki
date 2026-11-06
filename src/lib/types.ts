@@ -34,7 +34,8 @@ export type CaptionOrigin =
   | "upload"
   | "whisper";
 
-export type KoreanOrigin = "youtube-manual" | "youtube-auto-translate" | null;
+/** "ai": translated sentence-by-sentence by Claude (1:1 with the English). */
+export type KoreanOrigin = "youtube-manual" | "youtube-auto-translate" | "ai" | null;
 
 export type Lesson = {
   id: string;

@@ -17,6 +17,9 @@ npm run dev          # http://localhost:3000
 |---|---|
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (또는 `KV_REST_API_URL` / `KV_REST_API_TOKEN`) | 레슨 저장소(Upstash Redis). 없으면 로컬 파일(`./.data`)에 저장 — 로컬 개발 전용 |
 | `YOUTUBE_PROXY_URL` | 유튜브 요청에만 쓰는 회전형 주거용 프록시 (`http://아이디:비밀번호@호스트:포트`). Vercel 같은 데이터센터 IP는 유튜브에 차단되므로 배포 환경에서는 필수. 없으면 직접 요청(로컬 개발) |
+| `ANTHROPIC_API_KEY` | Claude로 문장별 한글 번역 생성 (한→영 말하기 모드에 필요). 레슨을 처음 열 때 한 번 번역해 저장 |
+| `ANTHROPIC_TRANSLATE_MODEL` | 번역 모델 (기본 `claude-opus-5-5`, 저렴한 대안 `claude-haiku-5-5`) |
+| `TRANSLATE_DAILY_LIMIT` | 하루 최대 번역 레슨 수 (기본 100) — 비용 안전장치 |
 | `OPENAI_API_KEY` | 유튜브가 아닌 영상/오디오 링크(.mp4, .mp3 …, 25MB 이하)의 자막을 Whisper로 자동 생성. 없으면 자막 파일(.srt/.vtt) 업로드 필요 |
 | `SAYKI_DATA_DIR` | 로컬 파일 저장 위치 (기본 `./.data`) |
 
@@ -44,7 +47,10 @@ npm run dev          # http://localhost:3000
   - 녹음(무음 감지 자동 종료) → 브라우저 음성 인식(Web Speech API) → 단어별 정오 표시와 점수
   - 내 녹음 듣기, 원본 → 내 녹음 비교 듣기
   - 단축키: Space 듣기/멈춤, ←/→ 이전/다음, R 녹음, L 반복
-- **진도 저장**: 문장별 최고 점수·마지막 위치·최근 레슨을 브라우저(localStorage)에 저장
+- **한→영 말하기 모드**: 한글 해석만 보고 영어로 말하기 → 원문 공개·일치율·원어민 음성 비교. 힌트(단어 첫 글자), 정답 보기
+  - `ANTHROPIC_API_KEY`가 있으면 레슨을 처음 열 때 Claude가 문장마다 1:1로 번역해 저장 (`POST /api/lessons/[id]/translate`)
+  - 없으면 유튜브 한국어 자막이 있는 영상에서만 사용 가능
+- **진도 저장**: 문장별 최고 점수(모드별)·마지막 위치·최근 레슨을 브라우저(localStorage)에 저장
 
 ## 구조
 

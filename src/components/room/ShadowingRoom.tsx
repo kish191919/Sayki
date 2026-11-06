@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useEffectEvent, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import {
   CompareIcon,
   EyeIcon,
@@ -20,6 +20,7 @@ import {
   saveProgress,
   saveSettings,
   touchRecent,
+  type PracticeMode,
   type Settings,
   type WaitMode,
 } from "@/lib/progress";
@@ -50,7 +51,14 @@ type Engine = {
   pausedAt: number;
 };
 
+type TranslateState = { status: "idle" | "working" | "error"; message?: string };
+
 const RATES = [0.5, 0.75, 1, 1.25, 1.5];
+
+const MODES: { value: PracticeMode; label: string }[] = [
+  { value: "shadow", label: "듣고 따라 말하기" },
+  { value: "speak", label: "한국어 보고 영어로 말하기" },
+];
 
 const WAIT_MODES: { value: WaitMode; label: string; hint: string }[] = [
   { value: "manual", label: "문장마다 멈춤", hint: "한 문장을 듣고 멈춰요. 따라 말한 뒤 직접 넘어가요." },
@@ -75,10 +83,32 @@ function formatTime(sec: number) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
+/** "I was a major." → "I w__ a m____." — first letter of each word. */
+function hintFor(text: string) {
+  return text
+    .split(" ")
+    .map((word) => {
+      let seen = false;
+      return word.replace(/[\p{L}\p{N}]/gu, (c) => {
+        if (seen) return "_";
+        seen = true;
+        return c;
+      });
+    })
+    .join(" ");
+}
+
+async function requestTranslation(lessonId: string): Promise<string[]> {
+  const res = await fetch(`/api/lessons/${lessonId}/translate`, { method: "POST" });
+  const data = (await res.json().catch(() => ({}))) as { ko?: string[]; error?: string };
+  if (!res.ok || !Array.isArray(data.ko)) throw new Error(data.error ?? "번역하지 못했어요.");
+  return data.ko;
+}
+
+export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson; canTranslate: boolean }) {
   const { sentences } = lesson;
   const total = sentences.length;
-  const hasKorean = useMemo(() => sentences.some((s) => s.ko), [sentences]);
+  const needsTranslation = canTranslate && lesson.koreanOrigin !== "ai";
 
   const playerRef = useRef<PlayerHandle>(null);
   const listRef = useRef<HTMLOListElement>(null);
@@ -100,17 +130,26 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
   const [playerError, setPlayerError] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [best, setBest] = useState<Record<number, number>>(() => loadProgress(lesson.id).best);
+  const [bestSpeak, setBestSpeak] = useState<Record<number, number>>(() => loadProgress(lesson.id).bestSpeak);
   const [current, setCurrent] = useState(() =>
     Math.min(Math.max(0, loadProgress(lesson.id).last || 0), total - 1),
   );
   const [playing, setPlaying] = useState(false);
   const [wait, setWait] = useState<{ key: number; ms: number } | null>(null);
-  const [tries, setTries] = useState<Record<number, Try>>({});
+  const [tries, setTries] = useState<Record<string, Try>>({});
   const [revealed, setRevealed] = useState<number | null>(null);
+  const [answerShown, setAnswerShown] = useState<number | null>(null);
+  const [hintShown, setHintShown] = useState<number | null>(null);
+  const [koAi, setKoAi] = useState<string[] | null>(null);
+  const [translate, setTranslate] = useState<TranslateState>({ status: needsTranslation ? "working" : "idle" });
   const [recognitionSupported] = useState(speechRecognitionSupported);
   const recorder = useRecorder(meterRef);
 
+  const speak = settings.mode === "speak";
   const update = (patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch }));
+  const koOf = (i: number) => koAi?.[i] || sentences[i].ko || "";
+  const hasKorean = koAi ? koAi.some(Boolean) : sentences.some((s) => s.ko);
+  const tryKey = (i: number) => `${settings.mode}:${i}`;
 
   /* ------------------------------ timing helpers ----------------------------- */
 
@@ -129,6 +168,7 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
     }
     return found;
   };
+  const clamp = (i: number) => Math.min(Math.max(0, i), total - 1);
 
   /* ------------------------------ playback control --------------------------- */
 
@@ -153,15 +193,16 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
   const play = (i: number, opts: { once?: boolean; afterEnd?: () => void } = {}) => {
     const p = playerRef.current;
     if (!p || !ready || recorder.status !== "idle") return;
-    const idx = Math.min(Math.max(0, i), total - 1);
+    const idx = clamp(i);
     clearWait();
     stopMine();
     const e = engine.current;
-    e.mode = !opts.once && settings.waitMode === "continuous" ? "continuous" : "segment";
+    // In Korean → English mode every sentence plays once: it is the answer.
+    e.once = Boolean(opts.once) || speak;
+    e.mode = !e.once && settings.waitMode === "continuous" ? "continuous" : "segment";
     e.index = idx;
     e.armed = false;
     e.armDeadline = performance.now() + 1500;
-    e.once = Boolean(opts.once);
     e.afterEnd = opts.afterEnd ?? null;
     setCurrent(idx);
     p.seek(startOf(idx));
@@ -177,9 +218,25 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
     playerRef.current?.pause();
   };
 
+  /** Moves to a sentence. In Korean → English mode it must not play (that would reveal the answer). */
+  const goTo = (i: number) => {
+    if (!speak) return play(i);
+    if (recorder.status !== "idle") return;
+    pause();
+    stopMine();
+    setCurrent(clamp(i));
+  };
+
+  const switchMode = (mode: PracticeMode) => {
+    if (mode === settings.mode || recorder.status !== "idle") return;
+    pause();
+    stopMine();
+    update({ mode });
+  };
+
   // Timers outlive the render that created them; route them through a ref
   // so they always call the latest `play`.
-  const playLatest = useRef(play);
+  const playLatest = useRef<typeof play | null>(null);
   useEffect(() => {
     playLatest.current = play;
   });
@@ -202,7 +259,7 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
     setWait({ key: Date.now(), ms });
     e.waitTimer = setTimeout(() => {
       setWait(null);
-      playLatest.current(next);
+      playLatest.current?.(next);
     }, ms);
   };
 
@@ -222,10 +279,10 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
       let j = indexAt(t);
       if (t >= endOf(j) - 0.1 && j < total - 1) j += 1;
       clearWait();
-      e.mode = settings.waitMode === "continuous" ? "continuous" : "segment";
+      e.once = speak;
+      e.mode = !e.once && settings.waitMode === "continuous" ? "continuous" : "segment";
       e.index = j;
       e.armed = true;
-      e.once = false;
       setCurrent(j);
       return;
     }
@@ -268,6 +325,37 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
     return () => clearInterval(id);
   }, [ready]);
 
+  /* ------------------------------ AI translation ----------------------------- */
+
+  useEffect(() => {
+    if (!needsTranslation) return;
+    let cancelled = false;
+    requestTranslation(lesson.id).then(
+      (ko) => {
+        if (cancelled) return;
+        setKoAi(ko);
+        setTranslate({ status: "idle" });
+      },
+      (e: Error) => {
+        if (!cancelled) setTranslate({ status: "error", message: e.message });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [needsTranslation, lesson.id]);
+
+  const retryTranslation = () => {
+    setTranslate({ status: "working" });
+    requestTranslation(lesson.id).then(
+      (ko) => {
+        setKoAi(ko);
+        setTranslate({ status: "idle" });
+      },
+      (e: Error) => setTranslate({ status: "error", message: e.message }),
+    );
+  };
+
   /* -------------------------------- recording -------------------------------- */
 
   const record = async () => {
@@ -279,31 +367,42 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
     pause();
     stopMine();
     const i = current;
+    const mode = settings.mode;
     const sentence = sentences[i];
-    const result = await recorder.start({
-      maxSeconds: Math.min(30, Math.max(5, (sentence.end - sentence.start) * 2.5 + 2)),
-    });
+    const length = sentence.end - sentence.start;
+    const result = await recorder.start(
+      mode === "speak"
+        ? // Composing a sentence takes longer than repeating one.
+          { maxSeconds: Math.min(40, Math.max(10, length * 3 + 6)), trailingSilenceMs: 2200, noSpeechMs: 12000 }
+        : { maxSeconds: Math.min(30, Math.max(5, length * 2.5 + 2)) },
+    );
     if (!result) return;
     if (result.url) urlsRef.current.push(result.url);
 
     const attempt = result.transcript ? scoreAttempt(sentence.text, result.transcript) : null;
     setTries((prev) => ({
       ...prev,
-      [i]: { attempt, url: result.url, heard: result.transcript, recognitionError: result.recognitionError },
+      [`${mode}:${i}`]: {
+        attempt,
+        url: result.url,
+        heard: result.transcript,
+        recognitionError: result.recognitionError,
+      },
     }));
-    if (attempt) {
-      setBest((prev) => ((prev[i] ?? -1) >= attempt.score ? prev : { ...prev, [i]: attempt.score }));
-      setRevealed(i);
-    }
+    if (!attempt) return;
+    const setter = mode === "speak" ? setBestSpeak : setBest;
+    setter((prev) => ((prev[i] ?? -1) >= attempt.score ? prev : { ...prev, [i]: attempt.score }));
+    if (mode === "speak") setAnswerShown(i);
+    else setRevealed(i);
   };
 
   const compare = (i: number) => {
-    const url = tries[i]?.url;
+    const url = tries[tryKey(i)]?.url;
     if (url) play(i, { once: true, afterEnd: () => playUrl(url) });
   };
 
   const playMine = (i: number) => {
-    const url = tries[i]?.url;
+    const url = tries[tryKey(i)]?.url;
     if (!url) return;
     pause();
     playUrl(url);
@@ -312,17 +411,20 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
   /* ------------------------------- side effects ------------------------------ */
 
   useEffect(() => saveSettings(settings), [settings]);
-  useEffect(() => saveProgress(lesson.id, { best, last: current }), [lesson.id, best, current]);
+  useEffect(
+    () => saveProgress(lesson.id, { best, bestSpeak, last: current }),
+    [lesson.id, best, bestSpeak, current],
+  );
   useEffect(() => {
     touchRecent({
       id: lesson.id,
       title: lesson.title,
       thumbnail: lesson.thumbnail,
       sentenceCount: total,
-      practiced: Object.keys(best).length,
+      practiced: new Set([...Object.keys(best), ...Object.keys(bestSpeak)]).size,
       at: Date.now(),
     });
-  }, [lesson.id, lesson.title, lesson.thumbnail, total, best]);
+  }, [lesson.id, lesson.title, lesson.thumbnail, total, best, bestSpeak]);
 
   useEffect(() => {
     if (ready) playerRef.current?.setRate(settings.rate);
@@ -358,11 +460,11 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
         break;
       case "ArrowRight":
         ev.preventDefault();
-        play(current + 1);
+        goTo(current + 1);
         break;
       case "ArrowLeft":
         ev.preventDefault();
-        play(current - 1);
+        goTo(current - 1);
         break;
       case "r":
       case "R":
@@ -371,7 +473,11 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
         break;
       case "l":
       case "L":
-        update({ loop: !settings.loop });
+        if (!speak) update({ loop: !settings.loop });
+        break;
+      case "h":
+      case "H":
+        if (speak) setHintShown((h) => (h === current ? null : current));
         break;
     }
   });
@@ -385,23 +491,76 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
   /* --------------------------------- render ---------------------------------- */
 
   const sentence = sentences[current];
-  const attemptState = tries[current];
+  const ko = koOf(current);
+  const attemptState = tries[tryKey(current)];
   const attempt = attemptState?.attempt ?? null;
   const showEnglish = settings.showText || revealed === current;
-  const practicedCount = Object.keys(best).length;
+  const modeBest = speak ? bestSpeak : best;
+  const practicedCount = Object.keys(modeBest).length;
   const average = practicedCount
-    ? Math.round(Object.values(best).reduce((a, b) => a + b, 0) / practicedCount)
+    ? Math.round(Object.values(modeBest).reduce((a, b) => a + b, 0) / practicedCount)
     : null;
   const recording = recorder.status === "recording" || recorder.status === "starting";
   const busy = recorder.status !== "idle";
   const waitHint = WAIT_MODES.find((m) => m.value === settings.waitMode)?.hint;
+  const answerVisible = answerShown === current || Boolean(attemptState);
+  const speakUnavailable = !hasKorean && translate.status !== "working";
+
+  const englishLine = attempt
+    ? attempt.marks.map((m, k) => (
+        <span key={k} className={m.ok ? "" : "rounded bg-bad-soft px-0.5 text-bad underline decoration-wavy underline-offset-4"}>
+          {m.text}{" "}
+        </span>
+      ))
+    : sentence.text;
+
+  const recordButton = (
+    <div className="flex w-full flex-row-reverse items-center gap-3 sm:ml-auto sm:w-auto sm:flex-row">
+      <div
+        ref={meterRef}
+        className={`h-2 w-16 shrink-0 overflow-hidden rounded-full bg-surface-2 ${recording ? "" : "invisible"}`}
+        aria-hidden="true"
+      >
+        <div className="h-full w-[calc(var(--level,0)*100%)] rounded-full bg-accent transition-[width] duration-75" />
+      </div>
+      <button
+        type="button"
+        onClick={() => void record()}
+        disabled={!ready || recorder.status === "finishing" || (speak && !ko)}
+        className={`inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full px-5 font-semibold text-on-accent transition disabled:opacity-40 sm:flex-none ${
+          recording ? "animate-pulse bg-bad" : "bg-accent hover:bg-accent-strong"
+        }`}
+        aria-label={recording ? "녹음 멈추기 (R)" : speak ? "영어로 말하기 (R)" : "따라 말하고 녹음하기 (R)"}
+      >
+        {recording ? <StopIcon /> : <MicIcon />}
+        {recording ? "멈추기" : recorder.status === "finishing" ? "분석 중…" : speak ? "영어로 말하기" : "따라 말하기"}
+      </button>
+    </div>
+  );
 
   return (
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+      {/* Mode switch */}
+      <div className="flex flex-wrap items-center gap-3 lg:col-span-2">
+        <ModeSwitch value={settings.mode} onChange={switchMode} speakDisabled={speakUnavailable} />
+        {translate.status === "working" && (
+          <span className="inline-flex items-center gap-2 text-xs font-semibold text-muted">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> AI가 문장별 한글 해석을 만드는 중…
+          </span>
+        )}
+        {translate.status === "error" && (
+          <span className="text-xs text-bad">
+            {translate.message}{" "}
+            <button type="button" className="font-semibold underline" onClick={retryTranslation}>
+              다시 시도
+            </button>
+          </span>
+        )}
+      </div>
+
       <section className="min-w-0 space-y-4">
-        {/* Video */}
-        {/* Height-capped on desktop so the practice controls stay on screen. */}
-        <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-sm lg:max-h-[max(18rem,calc(100dvh_-_31rem))]">
+        {/* Video — height-capped on desktop so the practice controls stay on screen. */}
+        <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-sm lg:max-h-[max(18rem,calc(100dvh_-_34rem))]">
           {lesson.source.kind === "youtube" ? (
             <YouTubePlayer
               ref={playerRef}
@@ -441,40 +600,60 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
               문장 <span className="text-ink">{current + 1}</span> / {total}
               <span className="ml-2 font-normal tabular-nums">{formatTime(sentence.start)}</span>
             </span>
-            {best[current] != null && (
-              <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE_BG[scoreTone(best[current])]}`}>
-                최고 {best[current]}점
+            {modeBest[current] != null && (
+              <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE_BG[scoreTone(modeBest[current])]}`}>
+                {speak ? `최고 일치율 ${modeBest[current]}%` : `최고 ${modeBest[current]}점`}
               </span>
             )}
           </div>
 
-          <div className="relative">
-            <p
-              className={`text-[1.35rem] font-semibold leading-relaxed tracking-[-0.01em] sm:text-2xl ${
-                showEnglish ? "" : "select-none blur-md"
-              }`}
-              lang="en"
-            >
-              {attempt
-                ? attempt.marks.map((m, k) => (
-                    <span key={k} className={m.ok ? "" : "rounded bg-bad-soft px-0.5 text-bad underline decoration-wavy underline-offset-4"}>
-                      {m.text}{" "}
-                    </span>
-                  ))
-                : sentence.text}
-            </p>
-            {!showEnglish && (
-              <button
-                type="button"
-                onClick={() => setRevealed(current)}
-                className="absolute inset-0 m-auto flex h-10 w-fit items-center gap-2 rounded-full bg-ink px-4 text-sm font-semibold text-bg"
-              >
-                <EyeIcon size={16} /> 문장 보기
-              </button>
-            )}
-          </div>
-          {hasKorean && settings.showKorean && sentence.ko && (
-            <p className="mt-2 break-keep text-base text-muted">{sentence.ko}</p>
+          {speak ? (
+            <>
+              <p className="text-xs font-semibold text-accent">이 뜻을 영어로 말해 보세요</p>
+              {ko ? (
+                <p className="mt-1 break-keep text-[1.35rem] font-semibold leading-relaxed sm:text-2xl">{ko}</p>
+              ) : (
+                <p className="mt-1 text-muted">
+                  {translate.status === "working" ? "한글 해석을 준비하고 있어요…" : "이 문장은 한글 해석이 없어요."}
+                </p>
+              )}
+              {hintShown === current && !answerVisible && (
+                <p className="mt-2 text-lg tracking-wide text-muted" lang="en">
+                  {hintFor(sentence.text)}
+                </p>
+              )}
+              {answerVisible && (
+                <div className="mt-4 rounded-xl border border-line p-4">
+                  <div className="mb-1 text-xs font-semibold text-muted">원문</div>
+                  <p className="text-lg font-semibold leading-relaxed" lang="en">
+                    {englishLine}
+                  </p>
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="relative">
+                <p
+                  className={`text-[1.35rem] font-semibold leading-relaxed tracking-[-0.01em] sm:text-2xl ${
+                    showEnglish ? "" : "select-none blur-md"
+                  }`}
+                  lang="en"
+                >
+                  {englishLine}
+                </p>
+                {!showEnglish && (
+                  <button
+                    type="button"
+                    onClick={() => setRevealed(current)}
+                    className="absolute inset-0 m-auto flex h-10 w-fit items-center gap-2 rounded-full bg-ink px-4 text-sm font-semibold text-bg"
+                  >
+                    <EyeIcon size={16} /> 문장 보기
+                  </button>
+                )}
+              </div>
+              {hasKorean && settings.showKorean && ko && <p className="mt-2 break-keep text-base text-muted">{ko}</p>}
+            </>
           )}
 
           {wait && (
@@ -492,107 +671,123 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
 
           {/* Transport */}
           <div className="mt-5 flex flex-wrap items-center gap-2">
-            <IconButton label="이전 문장 (←)" onClick={() => play(current - 1)} disabled={!ready || current === 0}>
+            <IconButton label="이전 문장 (←)" onClick={() => goTo(current - 1)} disabled={!ready || current === 0}>
               <PrevIcon />
             </IconButton>
-            <button
-              type="button"
-              onClick={() => (playing ? pause() : play(current))}
-              disabled={!ready || busy}
-              className="inline-flex h-12 items-center gap-2 rounded-full bg-ink px-5 font-semibold text-bg transition hover:opacity-90 disabled:opacity-40"
-              aria-label={playing ? "일시정지 (Space)" : "문장 듣기 (Space)"}
-            >
-              {playing ? <PauseIcon /> : <PlayIcon />}
-              {playing ? "일시정지" : "듣기"}
-            </button>
-            <IconButton label="다음 문장 (→)" onClick={() => play(current + 1)} disabled={!ready || current >= total - 1}>
-              <NextIcon />
-            </IconButton>
-            <IconButton
-              label={settings.loop ? "반복 끄기 (L)" : "이 문장 반복 (L)"}
-              onClick={() => update({ loop: !settings.loop })}
-              active={settings.loop}
-            >
-              <LoopIcon />
-            </IconButton>
-
-            <div className="flex w-full flex-row-reverse items-center gap-3 sm:ml-auto sm:w-auto sm:flex-row">
-              <div
-                ref={meterRef}
-                className={`h-2 w-16 shrink-0 overflow-hidden rounded-full bg-surface-2 ${recording ? "" : "invisible"}`}
-                aria-hidden="true"
-              >
-                <div className="h-full w-[calc(var(--level,0)*100%)] rounded-full bg-accent transition-[width] duration-75" />
-              </div>
+            {speak ? (
+              <>
+                <IconButton
+                  label="힌트: 단어 첫 글자 (H)"
+                  onClick={() => setHintShown((h) => (h === current ? null : current))}
+                  active={hintShown === current}
+                  disabled={answerVisible}
+                >
+                  <span className="text-sm font-bold">힌트</span>
+                </IconButton>
+                <IconButton label="정답 보기" onClick={() => setAnswerShown(current)} disabled={answerVisible}>
+                  <EyeIcon />
+                </IconButton>
+              </>
+            ) : (
               <button
                 type="button"
-                onClick={() => void record()}
-                disabled={!ready || recorder.status === "finishing"}
-                className={`inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full px-5 font-semibold text-on-accent transition disabled:opacity-40 sm:flex-none ${
-                  recording ? "animate-pulse bg-bad" : "bg-accent hover:bg-accent-strong"
-                }`}
-                aria-label={recording ? "녹음 멈추기 (R)" : "따라 말하고 녹음하기 (R)"}
+                onClick={() => (playing ? pause() : play(current))}
+                disabled={!ready || busy}
+                className="inline-flex h-12 items-center gap-2 rounded-full bg-ink px-5 font-semibold text-bg transition hover:opacity-90 disabled:opacity-40"
+                aria-label={playing ? "일시정지 (Space)" : "문장 듣기 (Space)"}
               >
-                {recording ? <StopIcon /> : <MicIcon />}
-                {recording ? "멈추기" : recorder.status === "finishing" ? "분석 중…" : "따라 말하기"}
+                {playing ? <PauseIcon /> : <PlayIcon />}
+                {playing ? "일시정지" : "듣기"}
               </button>
-            </div>
+            )}
+            <IconButton label="다음 문장 (→)" onClick={() => goTo(current + 1)} disabled={!ready || current >= total - 1}>
+              <NextIcon />
+            </IconButton>
+            {!speak && (
+              <IconButton
+                label={settings.loop ? "반복 끄기 (L)" : "이 문장 반복 (L)"}
+                onClick={() => update({ loop: !settings.loop })}
+                active={settings.loop}
+              >
+                <LoopIcon />
+              </IconButton>
+            )}
+            {recordButton}
           </div>
 
           {/* Result */}
-          {(recording || attemptState || recorder.error) && (
+          {(recording || attemptState || recorder.error || (speak && answerVisible)) && (
             <div className="mt-4 rounded-xl bg-surface-2 p-4 text-sm">
               {recorder.error ? (
                 <p className="font-semibold text-bad">{recorder.error}</p>
               ) : recording ? (
                 <p className="text-muted">
-                  <span className="font-semibold text-ink">듣고 있어요…</span> 문장을 소리 내어 말하면 자동으로 멈춰요.
-                  {recorder.liveText && <span className="mt-1 block text-ink" lang="en">{recorder.liveText}</span>}
+                  <span className="font-semibold text-ink">듣고 있어요…</span>{" "}
+                  {speak ? "생각한 영어 문장을 말해 보세요. 말을 마치면 자동으로 멈춰요." : "문장을 소리 내어 말하면 자동으로 멈춰요."}
+                  {recorder.liveText && (
+                    <span className="mt-1 block text-ink" lang="en">
+                      {recorder.liveText}
+                    </span>
+                  )}
                 </p>
-              ) : attemptState ? (
+              ) : (
                 <div className="space-y-3">
                   {attempt ? (
-                    <div className="flex items-baseline gap-3">
+                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                       <span className={`text-3xl font-extrabold tabular-nums ${TONE_TEXT[scoreTone(attempt.score)]}`}>
                         {attempt.score}
-                        <span className="text-base">점</span>
+                        <span className="text-base">{speak ? "%" : "점"}</span>
                       </span>
-                      <span className="text-muted">
-                        {scoreTone(attempt.score) === "great"
-                          ? "아주 좋아요! 다음 문장으로 넘어가 볼까요?"
-                          : scoreTone(attempt.score) === "good"
-                            ? "좋아요. 빨간 단어에 집중해서 한 번 더!"
-                            : "원본을 다시 듣고 천천히 따라 해 보세요."}
+                      <span className="break-keep text-muted">
+                        {speak
+                          ? "원문 일치율이에요. 뜻이 같다면 다른 표현도 괜찮아요 — 원어민 문장과 비교해 보세요."
+                          : scoreTone(attempt.score) === "great"
+                            ? "아주 좋아요! 다음 문장으로 넘어가 볼까요?"
+                            : scoreTone(attempt.score) === "good"
+                              ? "좋아요. 빨간 단어에 집중해서 한 번 더!"
+                              : "원본을 다시 듣고 천천히 따라 해 보세요."}
                       </span>
                     </div>
-                  ) : (
+                  ) : attemptState ? (
                     <p className="text-muted">
                       {!recognitionSupported
                         ? "이 브라우저는 음성 인식을 지원하지 않아 점수를 매길 수 없어요. Chrome·Edge·Safari에서 이용해 주세요."
                         : RECOGNITION_ERRORS[attemptState.recognitionError ?? ""] ??
                           "말소리를 알아듣지 못했어요. 마이크에 조금 더 가까이 말해 보세요."}
                     </p>
-                  )}
-                  {attemptState.heard && (
+                  ) : null}
+                  {attemptState?.heard && (
                     <p className="text-muted">
-                      인식된 문장: <span className="text-ink" lang="en">{attemptState.heard}</span>
+                      {speak ? "내가 말한 문장" : "인식된 문장"}:{" "}
+                      <span className="text-ink" lang="en">
+                        {attemptState.heard}
+                      </span>
                     </p>
                   )}
-                  {attemptState.url && (
-                    <div className="flex flex-wrap gap-2">
-                      <SmallButton onClick={() => playMine(current)}>
-                        <HeadphonesIcon size={16} /> 내 녹음 듣기
+                  <div className="flex flex-wrap gap-2">
+                    {speak && (
+                      <SmallButton onClick={() => play(current, { once: true })} disabled={!ready}>
+                        <PlayIcon size={16} /> 원어민 듣기
                       </SmallButton>
-                      <SmallButton onClick={() => compare(current)} disabled={!ready}>
-                        <CompareIcon size={16} /> 원본 → 내 녹음
-                      </SmallButton>
+                    )}
+                    {attemptState?.url && (
+                      <>
+                        <SmallButton onClick={() => playMine(current)}>
+                          <HeadphonesIcon size={16} /> 내 녹음 듣기
+                        </SmallButton>
+                        <SmallButton onClick={() => compare(current)} disabled={!ready}>
+                          <CompareIcon size={16} /> 원어민 → 내 녹음
+                        </SmallButton>
+                      </>
+                    )}
+                    {!speak && attemptState?.url && (
                       <SmallButton onClick={() => play(current, { once: true })} disabled={!ready}>
                         <ReplayIcon size={16} /> 원본 다시 듣기
                       </SmallButton>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
-              ) : null}
+              )}
             </div>
           )}
         </div>
@@ -606,34 +801,38 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
               onChange={(rate) => update({ rate })}
             />
           </Field>
-          <Field label="재생 방식" hint={waitHint}>
-            <select
-              value={settings.waitMode}
-              onChange={(e) => {
-                clearWait();
-                update({ waitMode: e.target.value as WaitMode });
-              }}
-              className="h-9 w-full rounded-lg border border-line bg-surface px-2 font-medium"
-            >
-              {WAIT_MODES.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label="자막 표시">
-            <div className="flex flex-wrap gap-2">
-              <Toggle checked={settings.showText} onChange={(showText) => update({ showText })}>
-                영어 문장
-              </Toggle>
-              {hasKorean && (
-                <Toggle checked={settings.showKorean} onChange={(showKorean) => update({ showKorean })}>
-                  한글 해석
+          {!speak && (
+            <Field label="재생 방식" hint={waitHint}>
+              <select
+                value={settings.waitMode}
+                onChange={(e) => {
+                  clearWait();
+                  update({ waitMode: e.target.value as WaitMode });
+                }}
+                className="h-9 w-full rounded-lg border border-line bg-surface px-2 font-medium"
+              >
+                {WAIT_MODES.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {!speak && (
+            <Field label="자막 표시">
+              <div className="flex flex-wrap gap-2">
+                <Toggle checked={settings.showText} onChange={(showText) => update({ showText })}>
+                  영어 문장
                 </Toggle>
-              )}
-            </div>
-          </Field>
+                {hasKorean && (
+                  <Toggle checked={settings.showKorean} onChange={(showKorean) => update({ showKorean })}>
+                    한글 해석
+                  </Toggle>
+                )}
+              </div>
+            </Field>
+          )}
           <Field label="자막 싱크" hint="문장이 소리보다 빠르거나 늦게 끊기면 조절하세요.">
             <div className="flex items-center gap-2">
               <SmallButton onClick={() => update({ offset: Math.round((settings.offset - 0.1) * 10) / 10 })}>
@@ -654,8 +853,17 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
             </div>
           </Field>
           <p className="text-xs text-muted sm:col-span-2">
-            단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
-            <span className="block sm:inline sm:ml-1">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
+            {speak ? (
+              <>
+                단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>H</Kbd> 힌트 · <Kbd>Space</Kbd> 원어민 듣기 · <Kbd>←</Kbd>{" "}
+                <Kbd>→</Kbd> 이전/다음
+              </>
+            ) : (
+              <>
+                단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
+              </>
+            )}
+            <span className="block sm:ml-1 sm:inline">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
           </p>
         </div>
       </section>
@@ -667,18 +875,20 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
             <h2 className="font-bold">전체 문장</h2>
             <span className="text-xs text-muted">
               연습 {practicedCount}/{total}
-              {average != null && <> · 평균 {average}점</>}
+              {average != null && <> · 평균 {average}{speak ? "%" : "점"}</>}
             </span>
           </div>
-          <ol ref={listRef} className="relative max-h-[55vh] overflow-y-auto p-2 lg:max-h-[calc(100dvh-10rem)]">
+          <ol ref={listRef} className="relative max-h-[55vh] overflow-y-auto p-2 lg:max-h-[calc(100dvh-13rem)]">
             {sentences.map((s, i) => {
-              const score = best[i];
+              const score = modeBest[i];
               const active = i === current;
+              const lineKo = koOf(i);
+              const englishOpen = !speak || score != null || answerShown === i || Boolean(tries[tryKey(i)]);
               return (
                 <li key={i} data-index={i}>
                   <button
                     type="button"
-                    onClick={() => play(i)}
+                    onClick={() => goTo(i)}
                     disabled={!ready}
                     className={`flex w-full gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
                       active ? "bg-accent-soft" : "hover:bg-surface-2"
@@ -688,11 +898,29 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
                       {i + 1}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className={`block leading-snug ${active ? "font-semibold" : ""} ${settings.showText ? "" : "blur-[3px]"}`} lang="en">
-                        {s.text}
-                      </span>
-                      {hasKorean && settings.showKorean && s.ko && (
-                        <span className="mt-0.5 block break-keep text-xs text-muted">{s.ko}</span>
+                      {speak ? (
+                        <>
+                          <span className={`block break-keep leading-snug ${active ? "font-semibold" : ""}`}>
+                            {lineKo || <span className="text-muted">…</span>}
+                          </span>
+                          {englishOpen && (
+                            <span className="mt-0.5 block text-xs text-muted" lang="en">
+                              {s.text}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span
+                            className={`block leading-snug ${active ? "font-semibold" : ""} ${settings.showText ? "" : "blur-[3px]"}`}
+                            lang="en"
+                          >
+                            {s.text}
+                          </span>
+                          {hasKorean && settings.showKorean && lineKo && (
+                            <span className="mt-0.5 block break-keep text-xs text-muted">{lineKo}</span>
+                          )}
+                        </>
                       )}
                     </span>
                     {score != null && (
@@ -712,6 +940,40 @@ export default function ShadowingRoom({ lesson }: { lesson: Lesson }) {
 }
 
 /* ------------------------------- small pieces -------------------------------- */
+
+function ModeSwitch({
+  value,
+  onChange,
+  speakDisabled,
+}: {
+  value: PracticeMode;
+  onChange: (mode: PracticeMode) => void;
+  speakDisabled: boolean;
+}) {
+  return (
+    <div className="inline-flex rounded-xl bg-surface-2 p-1" role="tablist" aria-label="연습 방식">
+      {MODES.map((m) => {
+        const disabled = m.value === "speak" && speakDisabled;
+        return (
+          <button
+            key={m.value}
+            type="button"
+            role="tab"
+            aria-selected={value === m.value}
+            onClick={() => onChange(m.value)}
+            disabled={disabled}
+            title={disabled ? "한글 해석이 없는 영상이에요" : undefined}
+            className={`h-9 rounded-lg px-3 text-sm font-semibold transition disabled:opacity-40 sm:px-4 ${
+              value === m.value ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
+            }`}
+          >
+            {m.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 function IconButton({
   label,
@@ -734,7 +996,7 @@ function IconButton({
       title={label}
       aria-label={label}
       aria-pressed={active}
-      className={`inline-flex h-12 w-12 items-center justify-center rounded-full border transition disabled:opacity-40 ${
+      className={`inline-flex h-12 min-w-12 items-center justify-center rounded-full border px-3 transition disabled:opacity-40 ${
         active ? "border-accent bg-accent-soft text-accent" : "border-line hover:bg-surface-2"
       }`}
     >

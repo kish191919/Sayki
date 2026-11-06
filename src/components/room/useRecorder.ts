@@ -67,10 +67,18 @@ type Session = {
 
 /** Volume (RMS) above which we consider the learner to be speaking. */
 const SPEECH_RMS = 0.02;
-/** Stop after this much silence once the learner has started speaking. */
+/** Default: stop after this much silence once the learner has started speaking. */
 const TRAILING_SILENCE_MS = 1300;
-/** Stop if the learner never starts speaking. */
+/** Default: stop if the learner never starts speaking. */
 const NO_SPEECH_MS = 6000;
+
+export type StartOptions = {
+  maxSeconds: number;
+  /** Silence that ends the recording after speech (longer when composing a sentence). */
+  trailingSilenceMs?: number;
+  /** How long to wait for the learner to start speaking. */
+  noSpeechMs?: number;
+};
 
 const MIC_ERRORS: Record<string, string> = {
   NotAllowedError: "마이크 권한이 필요해요. 주소창의 사이트 설정에서 마이크를 허용해 주세요.",
@@ -131,7 +139,7 @@ export function useRecorder(meterRef: RefObject<HTMLElement | null>) {
   }, [meterRef, settle]);
 
   const start = useCallback(
-    async ({ maxSeconds }: { maxSeconds: number }): Promise<RecordingResult | null> => {
+    async ({ maxSeconds, trailingSilenceMs = TRAILING_SILENCE_MS, noSpeechMs = NO_SPEECH_MS }: StartOptions): Promise<RecordingResult | null> => {
       if (sessionRef.current) return null;
       setError(null);
       setLiveText("");
@@ -241,9 +249,9 @@ export function useRecorder(meterRef: RefObject<HTMLElement | null>) {
               silentSince = 0;
             } else if (spoke) {
               if (!silentSince) silentSince = now;
-              else if (now - silentSince > TRAILING_SILENCE_MS) return stop();
+              else if (now - silentSince > trailingSilenceMs) return stop();
             }
-            if (!spoke && now - startedAt > NO_SPEECH_MS) return stop();
+            if (!spoke && now - startedAt > noSpeechMs) return stop();
             s.raf = requestAnimationFrame(tick);
           };
           s.raf = requestAnimationFrame(tick);

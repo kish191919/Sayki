@@ -11,6 +11,6 @@ const ShadowingRoom = dynamic(() => import("./ShadowingRoom"), {
   loading: () => <RoomSkeleton />,
 });
 
-export default function RoomLoader({ lesson }: { lesson: Lesson }) {
-  return <ShadowingRoom lesson={lesson} />;
+export default function RoomLoader({ lesson, canTranslate }: { lesson: Lesson; canTranslate: boolean }) {
+  return <ShadowingRoom lesson={lesson} canTranslate={canTranslate} />;
 }
