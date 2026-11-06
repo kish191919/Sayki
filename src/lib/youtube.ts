@@ -4,20 +4,40 @@ import { cleanCaptionText, isAnnotationToken } from "./text";
 import type { CaptionOrigin, Cue, Word } from "./types";
 
 const PLAYER_ENDPOINT = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
-const CLIENT = {
-  clientName: "ANDROID",
-  clientVersion: "20.10.38",
-  androidSdkVersion: 34,
-  hl: "en",
-  gl: "US",
-};
-const USER_AGENT = `com.google.android.youtube/${CLIENT.clientVersion} (Linux; U; Android 14) gzip`;
+
+/**
+ * YouTube app clients whose player responses include caption URLs that work
+ * without a PO token. YouTube's bot check differs per client, so they are
+ * tried in order.
+ */
+const CLIENTS = [
+  {
+    name: "ANDROID",
+    context: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 34 },
+    userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+  },
+  {
+    name: "IOS",
+    context: {
+      clientName: "IOS",
+      clientVersion: "20.10.4",
+      deviceMake: "Apple",
+      deviceModel: "iPhone16,2",
+      osName: "iPhone",
+      osVersion: "18.3.2.22D82",
+    },
+    userAgent: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+  },
+] as const;
+
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
 export type CaptionTrack = {
   baseUrl: string;
   languageCode: string;
   kind?: string;
+  /** User agent of the client that produced this track's URL. */
+  userAgent?: string;
 };
 
 export type VideoInfo = {
@@ -61,53 +81,76 @@ type PlayerResponse = {
   };
 };
 
+type Attempt = "ok" | "bot" | "unavailable" | "rate-limit" | "network";
+
 export async function fetchVideoInfo(videoId: string): Promise<VideoInfo> {
-  let res: Response;
-  try {
-    res = await fetch(PLAYER_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": USER_AGENT },
-      body: JSON.stringify({ context: { client: CLIENT }, videoId }),
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch {
-    throw new LessonError("YOUTUBE_NETWORK", "유튜브에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.", 502);
-  }
-  if (res.status === 429) {
-    throw new LessonError("YOUTUBE_RATE_LIMIT", "유튜브 요청이 많아 잠시 막혔어요. 몇 분 뒤에 다시 시도해 주세요.", 503);
-  }
-  if (!res.ok) {
-    throw new LessonError("YOUTUBE_NETWORK", `유튜브 정보를 가져오지 못했어요 (HTTP ${res.status}).`, 502);
+  const attempts: string[] = [];
+  let sawBot = false;
+  let sawRateLimit = false;
+  let sawUnavailable = false;
+
+  for (const client of CLIENTS) {
+    let outcome: Attempt = "network";
+    let data: PlayerResponse | null = null;
+    try {
+      const res = await fetch(PLAYER_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": client.userAgent },
+        body: JSON.stringify({ context: { client: { ...client.context, hl: "en", gl: "US" } }, videoId }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status === 429) outcome = "rate-limit";
+      else if (res.ok) data = (await res.json()) as PlayerResponse;
+    } catch {
+      outcome = "network";
+    }
+
+    if (data) {
+      const status = data.playabilityStatus?.status;
+      const renderer = data.captions?.playerCaptionsTracklistRenderer;
+      const tracks = (renderer?.captionTracks ?? []).filter((t) => t.baseUrl && t.languageCode);
+      // Captions are sometimes still included when playback itself is refused.
+      if (status === "OK" || tracks.length > 0) {
+        if (attempts.length) console.warn(`YouTube ${videoId}: ${attempts.join(", ")}; ${client.name} ok`);
+        return {
+          videoId,
+          title: data.videoDetails?.title?.trim() || "제목 없는 영상",
+          durationSec: Number(data.videoDetails?.lengthSeconds) || null,
+          thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+          tracks: tracks.map((t) => ({ ...t, userAgent: client.userAgent })),
+          canTranslateToKorean: (renderer?.translationLanguages ?? []).some((l) => l.languageCode === "ko"),
+        };
+      }
+      const reason = data.playabilityStatus?.reason ?? "";
+      outcome = status === "LOGIN_REQUIRED" && /bot/i.test(reason) ? "bot" : "unavailable";
+    }
+
+    attempts.push(`${client.name} ${outcome}`);
+    if (outcome === "bot") sawBot = true;
+    if (outcome === "rate-limit") sawRateLimit = true;
+    if (outcome === "unavailable") sawUnavailable = true;
   }
 
-  const data = (await res.json()) as PlayerResponse;
-  const status = data.playabilityStatus?.status;
-  if (status === "LOGIN_REQUIRED" && /bot/i.test(data.playabilityStatus?.reason ?? "")) {
-    // Datacenter IPs (e.g. serverless hosting) often get YouTube's bot check.
-    console.error(`YouTube bot check for ${videoId}: ${data.playabilityStatus?.reason}`);
-    throw new LessonError(
-      "YOUTUBE_BLOCKED",
-      "유튜브가 서버의 자막 요청을 막았어요. 잠시 후 다시 시도하거나, 자막 파일(.srt, .vtt)을 함께 올려 주세요.",
-      503,
-    );
-  }
-  if (status !== "OK") {
+  console.error(`YouTube ${videoId}: all clients failed (${attempts.join(", ")})`);
+  if (sawUnavailable && !sawBot) {
     throw new LessonError(
       "YOUTUBE_UNAVAILABLE",
       "이 영상의 정보를 가져올 수 없어요. 비공개·연령 제한·지역 제한 영상인지 확인해 주세요.",
       422,
     );
   }
-
-  const renderer = data.captions?.playerCaptionsTracklistRenderer;
-  return {
-    videoId,
-    title: data.videoDetails?.title?.trim() || "제목 없는 영상",
-    durationSec: Number(data.videoDetails?.lengthSeconds) || null,
-    thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-    tracks: (renderer?.captionTracks ?? []).filter((t) => t.baseUrl && t.languageCode),
-    canTranslateToKorean: (renderer?.translationLanguages ?? []).some((l) => l.languageCode === "ko"),
-  };
+  if (sawBot) {
+    // Datacenter IPs (e.g. serverless hosting) often get YouTube's bot check.
+    throw new LessonError(
+      "YOUTUBE_BLOCKED",
+      "유튜브가 서버의 자막 요청을 막았어요. 잠시 후 다시 시도하거나, 자막 파일(.srt, .vtt)을 함께 올려 주세요.",
+      503,
+    );
+  }
+  if (sawRateLimit) {
+    throw new LessonError("YOUTUBE_RATE_LIMIT", "유튜브 요청이 많아 잠시 막혔어요. 몇 분 뒤에 다시 시도해 주세요.", 503);
+  }
+  throw new LessonError("YOUTUBE_NETWORK", "유튜브에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.", 502);
 }
 
 /**
@@ -222,7 +265,7 @@ export async function fetchTrackCues(track: CaptionTrack, translateTo?: string):
   let res: Response;
   try {
     res = await fetch(url, {
-      headers: { "User-Agent": USER_AGENT },
+      headers: { "User-Agent": track.userAgent ?? CLIENTS[0].userAgent },
       signal: AbortSignal.timeout(20_000),
     });
   } catch {
