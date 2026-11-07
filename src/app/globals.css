@@ -5,6 +5,8 @@
   --bg: #f7f6f2;
   --surface: #ffffff;
   --surface-2: #f0eee8;
+  /* The picked option sitting on a surface-2 track (segmented controls). */
+  --raised: #ffffff;
   --ink: #17181c;
   --muted: #6b6d76;
   --line: #e5e2da;
@@ -26,6 +28,7 @@
     --bg: #111215;
     --surface: #1a1b1f;
     --surface-2: #24252b;
+    --raised: #3a3c44;
     --ink: #f3f2ee;
     --muted: #9b9da6;
     --line: #2e2f36;
@@ -46,6 +49,7 @@
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-raised: var(--raised);
   --color-ink: var(--ink);
   --color-muted: var(--muted);
   --color-line: var(--line);

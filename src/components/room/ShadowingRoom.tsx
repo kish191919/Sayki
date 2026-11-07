@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { Fragment, useEffect, useEffectEvent, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
+  ArrowRightIcon,
   BookmarkIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -12,6 +13,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   HeadphonesIcon,
+  HintIcon,
   LoopIcon,
   MicIcon,
   NextIcon,
@@ -43,6 +45,7 @@ import { hiddenRevision, hiddenWithLocalChanges, saveHidden, subscribeHidden } f
 import { scoreAttempt, scoreTone, type Attempt } from "@/lib/score";
 import { pendingAiLines } from "@/lib/translation-state";
 import type { Lesson, RoomBookmarks } from "@/lib/types";
+import { useKeepAlive, useMediaSession } from "./background";
 import { MediaPlayer, YouTubePlayer, type PlayerHandle } from "./players";
 import { useKoreanSpeech, type SpeechError } from "./useKoreanSpeech";
 import { speechRecognitionSupported, useRecorder } from "./useRecorder";
@@ -80,11 +83,20 @@ type Engine = {
   pausedAt: number;
   /** The repeat run in progress, if any. */
   repeat: Repeat | null;
+  /** When the lesson last made a sound, or was asked to (the video/audio, the Korean voice). */
+  heardAt: number;
 };
 
 type TranslateState = { status: "idle" | "working" | "error"; message?: string };
 
 const RATES = [0.5, 0.75, 1, 1.25, 1.5];
+
+/**
+ * Silence bridges the gaps of a practice run with the screen off only this long after the
+ * last sound — longer than any countdown, but a run stuck in the background (e.g. a video the
+ * phone won't play with the screen off) shouldn't play silence for ever.
+ */
+const KEEP_ALIVE_MS = 90_000;
 
 const MODES: { value: PracticeMode; label: string }[] = [
   { value: "shadow", label: "듣고 따라 말하기" },
@@ -142,8 +154,8 @@ const SAY_IN_ENGLISH = "영어로 말해 보세요";
 const RECALL_MEANING = "뜻을 떠올려 보세요";
 
 const SAY_TIMES: { value: "on" | "off"; label: string }[] = [
-  { value: "on", label: "주기" },
-  { value: "off", label: "건너뛰기" },
+  { value: "on", label: "있음" },
+  { value: "off", label: "없음" },
 ];
 
 /** "한국어를 읽어 주고 2초 뒤에 원어민 영어를 들려줘요. 3번 들려준 뒤 다음 문장으로 넘어가요." */
@@ -223,7 +235,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
 
   const playerRef = useRef<PlayerHandle>(null);
   const listRef = useRef<HTMLOListElement>(null);
-  const meterRef = useRef<HTMLDivElement>(null);
+  const meterRef = useRef<HTMLSpanElement>(null);
   const myAudioRef = useRef<HTMLAudioElement | null>(null);
   const urlsRef = useRef<string[]>([]);
   const engine = useRef<Engine>({
@@ -237,6 +249,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     waitThen: null,
     pausedAt: 0,
     repeat: null,
+    heardAt: 0,
   });
 
   const [ready, setReady] = useState(false);
@@ -290,6 +303,12 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const [recognitionSupported] = useState(speechRecognitionSupported);
   const recorder = useRecorder(meterRef);
   const koSpeech = useKoreanSpeech();
+  /**
+   * The lesson plays in the browser's own media element, which can go on with the screen
+   * off. YouTube's player can't: YouTube stops it in the background on phones.
+   */
+  const playsInBackground = lesson.source.kind !== "youtube";
+  const keepAlive = useKeepAlive(playsInBackground);
   /** Listen mode: the sentence whose hidden Korean was opened as text. */
   const [koRevealed, setKoRevealed] = useState<number | null>(null);
   /** Listen mode: a sentence to read aloud once its Korean (or the voice) is ready. */
@@ -448,12 +467,26 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     then?.();
   };
 
+  /**
+   * The room is between two sounds of a practice run — a countdown, or (with the screen off)
+   * anything in a repeat run such as the Korean voice — so silence should keep the page
+   * awake (see `useKeepAlive`). Only for a while after the last sound: see KEEP_ALIVE_MS.
+   */
+  const needsKeepAlive = (isPlaying: boolean) => {
+    const e = engine.current;
+    if (isPlaying || performance.now() - e.heardAt > KEEP_ALIVE_MS) return false;
+    return e.waitThen !== null || (e.repeat !== null && document.visibilityState === "hidden");
+  };
+
   /** Shows a countdown (time to speak), then runs `then`. */
   const holdThen = (ms: number, label: string, then: () => void) => {
     clearWait();
     setWait({ key: Date.now(), ms, label });
     engine.current.waitThen = then;
     engine.current.waitTimer = setTimeout(skipWait, ms);
+    // The video/audio has just paused: without a sound the phone would put the page to sleep
+    // (screen off) before the countdown ends.
+    keepAlive(needsKeepAlive(false));
   };
 
   /** Ends the repeat run in progress (repeating itself stays switched on). */
@@ -495,6 +528,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     e.armed = false;
     e.armDeadline = performance.now() + 1500;
     e.afterEnd = opts.afterEnd ?? null;
+    e.heardAt = performance.now();
     setCurrent(idx);
     p.seek(startOf(idx));
     p.play();
@@ -524,6 +558,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     e.afterEnd = null;
     e.pausedAt = performance.now();
     playerRef.current?.pause();
+    keepAlive(false);
   };
 
   /* ------------------------------- repeat runs ------------------------------- */
@@ -591,8 +626,18 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       if (part === "en") playSegment(i, { afterEnd: done });
       else {
         stopMine();
-        // A voice that won't play would fail the same way every time round: stop and say so.
-        koSpeech.speak(koOf(i), (ok) => (ok ? done() : endRepeat()));
+        const e = engine.current;
+        e.heardAt = performance.now();
+        // The browser's voice doesn't keep the page awake with the screen off; silence under
+        // it does. (On screen, silence is stopped instead, so it can't get in the voice's way.)
+        keepAlive(needsKeepAlive(false));
+        koSpeech.speak(koOf(i), (ok) => {
+          if (ok) e.heardAt = performance.now();
+          // A voice that won't play would fail the same way every time round: stop and say so.
+          // With the screen off the phone may just not allow it: carry on with the English.
+          if (ok || document.visibilityState === "hidden") done();
+          else endRepeat();
+        });
       }
       return;
     }
@@ -757,6 +802,9 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     if (!p) return;
     const isPlaying = p.isPlaying();
     setPlaying(isPlaying);
+    if (isPlaying) engine.current.heardAt = performance.now();
+    // Silence only fills gaps: it stops once the video/audio plays, the run ends or it's paused.
+    keepAlive(needsKeepAlive(isPlaying));
     if (!isPlaying) return;
 
     const t = p.getTime();
@@ -852,7 +900,17 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   useEffect(() => {
     if (!ready) return;
     const id = setInterval(onTick, 40);
-    return () => clearInterval(id);
+    // With the screen off, timers slow to about once a second, which would run a sentence on
+    // into the next one: the audio's own progress events keep its end on time. Turning the
+    // screen off or on starts or stops the silence that keeps a run going in the background.
+    const tick = () => onTick();
+    const stopProgress = playerRef.current?.onProgress?.(tick);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      stopProgress?.();
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [ready]);
 
   /* ------------------------------ AI translation ----------------------------- */
@@ -1095,6 +1153,32 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const markedPosition = markedList.indexOf(current) + 1;
   const prevIndex = prevOf(current);
   const nextIndex = nextOf(current);
+
+  // The lock screen shows the English sentence only where it's on screen anyway (shadowing
+  // with the text shown): listening practice and the Korean → English answer stay hidden.
+  const sentenceOnLockScreen = !speak && settings.showText;
+  useMediaSession(
+    playsInBackground,
+    {
+      title: sentenceOnLockScreen ? sentence.text : lesson.title,
+      artist: `${sentenceOnLockScreen ? `${lesson.title} · ` : ""}문장 ${current + 1}/${total}`,
+      // The script cover is an SVG, which lock screens don't show: the app icon stands in.
+      artwork: lesson.thumbnail && !lesson.thumbnail.endsWith(".svg") ? lesson.thumbnail : null,
+    },
+    running || wait !== null,
+    {
+      // Starts the current sentence over, as "듣기" does.
+      play: () => play(current),
+      pause,
+      previous: () => {
+        if (prevIndex !== null) goTo(prevIndex);
+      },
+      next: () => {
+        if (nextIndex !== null) goTo(nextIndex);
+      },
+    },
+  );
+
   /** Why the repeat settings can't read Korean aloud here, if they can't. */
   const repeatKoBlocked = noVoice ? "이 브라우저는 음성 읽기를 지원하지 않아요" : speakUnavailable ? NO_KOREAN : undefined;
   const repeatOrder = repeatKoBlocked ? "en" : settings.repeatOrder;
@@ -1111,6 +1195,19 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
         ? `${repeatRound}/${settings.repeatCount}`
         : `${settings.repeatCount}번`;
   const repeatOrderTag = REPEAT_ORDERS.find((o) => o.value === repeatOrder)?.short;
+  /** Keyboard shortcuts for this mode, listed in the settings: playback, speaking, then the rest. */
+  const shortcuts = [
+    { keys: ["Space"], label: speak ? "원어민 듣기/멈춤" : "듣기/멈춤" },
+    { keys: ["←", "→"], label: "이전/다음 문장" },
+    { keys: ["R"], label: speak ? "영어로 말하기" : "녹음" },
+    speak && { keys: ["K"], label: "한국어 듣기" },
+    speak && !noVoice && { keys: ["M"], label: "한국어 음소거" },
+    speak && { keys: ["H"], label: "힌트" },
+    { keys: ["L"], label: "반복 켜기/끄기" },
+    { keys: ["S"], label: "기다리기 건너뛰기" },
+    canBookmark && { keys: ["B"], label: "북마크" },
+    canHide && { keys: ["Del"], label: "문장 삭제" },
+  ].filter((s): s is { keys: string[]; label: string } => Boolean(s));
 
   const englishLine = attempt
     ? attempt.marks.map((m, k) => (
@@ -1121,27 +1218,26 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     : sentence.text;
 
   const recordButton = (
-    <div className="flex w-full flex-row-reverse items-center gap-3 sm:ml-auto sm:w-auto sm:flex-row">
-      <div
+    <button
+      type="button"
+      onClick={() => void record()}
+      disabled={!ready || recorder.status === "finishing" || (speak && !ko)}
+      className={`relative inline-flex h-12 w-full items-center justify-center gap-2 overflow-hidden rounded-full px-6 font-semibold text-on-accent transition disabled:opacity-40 sm:ml-auto sm:w-auto ${
+        recording ? "animate-pulse bg-bad" : "bg-accent hover:bg-accent-strong"
+      }`}
+      aria-label={recording ? "녹음 멈추기 (R)" : speak ? "영어로 말하기 (R)" : "따라 말하고 녹음하기 (R)"}
+    >
+      {recording ? <StopIcon /> : <MicIcon />}
+      {recording ? "멈추기" : recorder.status === "finishing" ? "분석 중…" : speak ? "영어로 말하기" : "따라 말하기"}
+      {/* Microphone level while recording — inside the button so it takes no room in the row. */}
+      <span
         ref={meterRef}
-        className={`h-2 w-16 shrink-0 overflow-hidden rounded-full bg-surface-2 ${recording ? "" : "invisible"}`}
         aria-hidden="true"
+        className={`absolute inset-x-6 bottom-1.5 h-1 overflow-hidden rounded-full bg-white/25 ${recording ? "" : "invisible"}`}
       >
-        <div className="h-full w-[calc(var(--level,0)*100%)] rounded-full bg-accent transition-[width] duration-75" />
-      </div>
-      <button
-        type="button"
-        onClick={() => void record()}
-        disabled={!ready || recorder.status === "finishing" || (speak && !ko)}
-        className={`inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full px-5 font-semibold text-on-accent transition disabled:opacity-40 sm:flex-none ${
-          recording ? "animate-pulse bg-bad" : "bg-accent hover:bg-accent-strong"
-        }`}
-        aria-label={recording ? "녹음 멈추기 (R)" : speak ? "영어로 말하기 (R)" : "따라 말하고 녹음하기 (R)"}
-      >
-        {recording ? <StopIcon /> : <MicIcon />}
-        {recording ? "멈추기" : recorder.status === "finishing" ? "분석 중…" : speak ? "영어로 말하기" : "따라 말하기"}
-      </button>
-    </div>
+        <span className="block h-full w-[calc(var(--level,0)*100%)] rounded-full bg-white transition-[width] duration-75" />
+      </span>
+    </button>
   );
 
   return (
@@ -1469,7 +1565,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
             </div>
           )}
 
-          {/* Transport */}
+          {/* Transport: playback (with repeat) · answer aids · speak. */}
           <div className="mt-5 flex flex-wrap items-center gap-2">
             <IconButton
               label={filtered ? "이전 북마크 문장 (←)" : "이전 문장 (←)"}
@@ -1507,16 +1603,18 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                 aria-pressed={settings.loop}
                 aria-label={settings.loop ? `반복 끄기 (L) — ${repeatSummary}` : "이 문장 반복 듣기 (L)"}
                 title={settings.loop ? `반복 끄기 (L)\n${repeatSummary}` : "이 문장 반복 듣기 (L)"}
-                className={`inline-flex items-center gap-1.5 pl-3.5 pr-2.5 transition ${
+                className={`inline-flex items-center gap-1.5 pl-4 pr-3 transition ${
                   settings.loop ? "hover:bg-accent/10" : "hover:bg-surface-2"
                 }`}
               >
-                <LoopIcon />
-                {settings.loop && (
-                  <span className="text-xs font-bold tabular-nums">
-                    {repeatOrderTag && <span className="mr-1 hidden sm:inline">{repeatOrderTag}</span>}
+                <LoopIcon size={18} />
+                {settings.loop ? (
+                  <span className="text-sm font-bold tabular-nums">
+                    <span className="mr-1 hidden sm:inline">{repeatOrderTag || "반복"}</span>
                     {repeatTag}
                   </span>
+                ) : (
+                  <span className="text-sm font-semibold">반복</span>
                 )}
               </button>
               <button
@@ -1526,7 +1624,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                 aria-controls="repeat-options"
                 aria-label="반복 설정"
                 title="반복 설정"
-                className={`inline-flex w-8 items-center justify-center border-l transition ${
+                className={`inline-flex w-10 items-center justify-center border-l transition ${
                   settings.loop ? "border-accent/30 hover:bg-accent/10" : "border-line hover:bg-surface-2"
                 }`}
               >
@@ -1535,19 +1633,22 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
             </div>
             {speak && (
               <>
+                <span aria-hidden="true" className="mx-1 hidden h-7 w-px bg-line sm:block" />
                 <IconButton
                   label="힌트: 단어 첫 글자 (H)"
                   onClick={toggleHint}
                   active={hintShown === current && !answerVisible}
                 >
-                  <span className="text-sm font-bold">힌트</span>
+                  <HintIcon size={18} />
+                  <span className="text-sm font-semibold">힌트</span>
                 </IconButton>
                 <IconButton
                   label={answerVisible ? "정답 숨기기" : "정답 보기"}
                   onClick={() => setAnswer(current, !answerVisible)}
                   active={answerVisible}
                 >
-                  {answerVisible ? <EyeOffIcon /> : <EyeIcon />}
+                  {answerVisible ? <EyeOffIcon size={18} /> : <EyeIcon size={18} />}
+                  <span className="text-sm font-semibold">정답</span>
                 </IconButton>
               </>
             )}
@@ -1655,7 +1756,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
             <Chevron open={settings.settingsOpen} />
           </button>
           {settings.settingsOpen && (
-            <div id="room-settings" className="grid gap-4 border-t border-line p-5 sm:grid-cols-2">
+            <div id="room-settings" className="@container grid gap-5 border-t border-line p-5 sm:grid-cols-2">
               <Field label="재생 속도">
                 <Segmented
                   options={RATES.map((r) => ({ value: r, label: `${r}x` }))}
@@ -1672,7 +1773,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                       if (!engine.current.repeat) clearWait();
                       update({ waitMode: e.target.value as WaitMode });
                     }}
-                    className="h-9 w-full rounded-lg border border-line bg-surface px-2 font-medium"
+                    className="h-10 w-full rounded-xl border border-line bg-surface px-3 font-medium"
                   >
                     {WAIT_MODES.map((m) => (
                       <option key={m.value} value={m.value}>
@@ -1697,17 +1798,29 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                 </Field>
               )}
               <Field label="자막 싱크" hint="문장이 소리보다 빠르거나 늦게 끊기면 조절하세요.">
-                <div className="flex items-center gap-2">
-                  <SmallButton onClick={() => update({ offset: Math.round((settings.offset - 0.1) * 10) / 10 })}>
-                    −0.1초
-                  </SmallButton>
-                  <span className="w-14 text-center font-semibold tabular-nums">
-                    {settings.offset > 0 ? "+" : ""}
-                    {settings.offset.toFixed(1)}초
-                  </span>
-                  <SmallButton onClick={() => update({ offset: Math.round((settings.offset + 0.1) * 10) / 10 })}>
-                    +0.1초
-                  </SmallButton>
+                <div className="flex items-center gap-3">
+                  <div className="inline-flex h-10 items-stretch overflow-hidden rounded-xl border border-line">
+                    <button
+                      type="button"
+                      onClick={() => update({ offset: Math.round((settings.offset - 0.1) * 10) / 10 })}
+                      aria-label="자막 0.1초 앞당기기"
+                      className="px-3 font-medium text-muted transition hover:bg-surface-2 hover:text-ink"
+                    >
+                      −0.1초
+                    </button>
+                    <span className="flex w-16 items-center justify-center border-x border-line font-semibold tabular-nums">
+                      {settings.offset > 0 ? "+" : ""}
+                      {settings.offset.toFixed(1)}초
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => update({ offset: Math.round((settings.offset + 0.1) * 10) / 10 })}
+                      aria-label="자막 0.1초 늦추기"
+                      className="px-3 font-medium text-muted transition hover:bg-surface-2 hover:text-ink"
+                    >
+                      +0.1초
+                    </button>
+                  </div>
                   {settings.offset !== 0 && (
                     <button type="button" className="text-muted underline" onClick={() => update({ offset: 0 })}>
                       초기화
@@ -1715,26 +1828,25 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                   )}
                 </div>
               </Field>
-              <p className="text-xs text-muted sm:col-span-2">
-                {speak ? (
-                  <>
-                    단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>K</Kbd> 한국어 듣기
-                    {!noVoice && <> · <Kbd>M</Kbd> 한국어 음소거</>} · <Kbd>H</Kbd> 힌트 ·{" "}
-                    <Kbd>Space</Kbd> 원어민 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복 ·{" "}
-                    <Kbd>S</Kbd> 기다리기 건너뛰기
-                    {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
-                    {canHide && <> · <Kbd>Del</Kbd> 문장 삭제</>}
-</>
-                ) : (
-                  <>
-                    단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복 ·{" "}
-                    <Kbd>S</Kbd> 기다리기 건너뛰기
-                    {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
-                    {canHide && <> · <Kbd>Del</Kbd> 문장 삭제</>}
-                  </>
-                )}
-                <span className="block sm:ml-1 sm:inline">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
-              </p>
+              {/* Phones have no keyboard: no shortcuts there. */}
+              <div className="hidden border-t border-line pt-4 sm:col-span-2 sm:block">
+                <div className="mb-2.5 text-xs font-semibold text-muted">단축키</div>
+                <ul className="grid grid-cols-1 gap-x-6 gap-y-2 text-xs @sm:grid-cols-2 @2xl:grid-cols-3 @4xl:grid-cols-4">
+                  {shortcuts.map((s) => (
+                    <li key={s.label} className="flex items-center gap-2">
+                      <span className="flex w-14 shrink-0 gap-1">
+                        {s.keys.map((k) => (
+                          <Kbd key={k}>{k}</Kbd>
+                        ))}
+                      </span>
+                      <span className="break-keep text-muted">{s.label}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-3 break-keep text-xs text-muted">
+                  영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요.
+                </p>
+              </div>
             </div>
           )}
         </div>
@@ -1972,7 +2084,7 @@ function ModeSwitch({
             disabled={disabled}
             title={reason}
             className={`min-h-9 flex-1 break-keep rounded-lg px-3 py-1.5 text-sm font-semibold leading-tight transition disabled:opacity-40 sm:flex-initial sm:px-4 ${
-              value === m.value ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
+              value === m.value ? "bg-raised text-ink shadow-sm" : "text-muted hover:text-ink"
             }`}
           >
             {m.label}
@@ -2004,7 +2116,7 @@ function IconButton({
       title={label}
       aria-label={label}
       aria-pressed={active}
-      className={`inline-flex h-12 min-w-12 items-center justify-center rounded-full border px-3 transition disabled:opacity-40 ${
+      className={`inline-flex h-12 min-w-12 items-center justify-center gap-1.5 rounded-full border px-3.5 transition disabled:opacity-40 ${
         active ? "border-accent bg-accent-soft text-accent" : "border-line hover:bg-surface-2"
       }`}
     >
@@ -2037,9 +2149,9 @@ function SmallButton({
 function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div>
-      <div className="mb-1.5 font-semibold">{label}</div>
+      <div className="mb-2 font-semibold">{label}</div>
       {children}
-      {hint && <p className="mt-1.5 text-xs text-muted">{hint}</p>}
+      {hint && <p className="mt-2 break-keep text-xs text-muted">{hint}</p>}
     </div>
   );
 }
@@ -2057,7 +2169,7 @@ function Segmented<T extends string | number>({
   label?: string;
 }) {
   return (
-    <div className="inline-flex flex-wrap rounded-lg bg-surface-2 p-1" role="group" aria-label={label}>
+    <div className="inline-flex max-w-full flex-wrap gap-0.5 rounded-xl bg-surface-2 p-1" role="group" aria-label={label}>
       {options.map((o) => (
         <button
           key={String(o.value)}
@@ -2066,8 +2178,8 @@ function Segmented<T extends string | number>({
           disabled={Boolean(o.disabled)}
           title={o.disabled}
           aria-pressed={o.value === value}
-          className={`h-7 rounded-md px-2.5 text-xs font-semibold transition disabled:opacity-40 ${
-            o.value === value ? "bg-surface text-ink shadow-sm" : "text-muted enabled:hover:text-ink"
+          className={`h-9 flex-auto whitespace-nowrap rounded-lg px-3 text-sm font-semibold transition disabled:opacity-40 sm:h-8 ${
+            o.value === value ? "bg-raised text-ink shadow-sm" : "text-muted enabled:hover:text-ink"
           }`}
         >
           {o.label}
@@ -2103,72 +2215,173 @@ function RepeatPanel({
 }) {
   const bothLanguages = order === "ko-en" || order === "en-ko";
   return (
-    <div id="repeat-options" className="mt-4 rounded-xl border border-line p-4 text-sm">
-      <div className="mb-3 flex items-center gap-3">
-        <span className="font-semibold">반복 설정</span>
-        <Toggle checked={on} onChange={onToggle}>
-          반복 켜기
-        </Toggle>
+    <div id="repeat-options" className="@container mt-4 rounded-xl border border-line p-4 text-sm sm:p-5">
+      <div className="flex items-center gap-3">
+        <span className="font-semibold">반복 재생</span>
+        <Switch checked={on} onChange={onToggle} label="반복 재생" />
         <button
           type="button"
           onClick={onClose}
           aria-label="반복 설정 닫기"
           title="닫기"
-          className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-full text-muted transition hover:bg-surface-2 hover:text-ink"
+          className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-full text-muted transition hover:bg-surface-2 hover:text-ink"
         >
-          <CloseIcon size={16} />
+          <CloseIcon size={18} />
         </button>
       </div>
-      <div className="space-y-3">
-        <RepeatRow label="반복 횟수">
+
+      {/* What one sentence will sound like with these settings. */}
+      <div className="mt-3 rounded-lg bg-surface-2 px-3.5 py-3">
+        {!on && <p className="mb-2 text-xs font-semibold text-muted">반복이 꺼져 있어요. 켜면 이렇게 들려줘요.</p>}
+        <div className={on ? "" : "opacity-60"}>
+          <RepeatFlow order={order} count={count} gap={gap} sayTime={sayTime} />
+        </div>
+        <p className="mt-2.5 break-keep text-xs leading-relaxed text-muted">
+          {koBlocked && <>{koBlocked}. 영어만 반복해요. </>}
+          {summary}
+        </p>
+      </div>
+
+      <div className="mt-4 grid gap-x-6 gap-y-4 @xl:grid-cols-2">
+        <RepeatField label="듣는 순서">
           <Segmented
-            label="반복 횟수"
-            options={REPEAT_COUNTS}
-            value={count}
-            onChange={(repeatCount) => onChange({ repeatCount })}
-          />
-        </RepeatRow>
-        <RepeatRow label="읽어 주기">
-          <Segmented
-            label="읽어 주기"
+            label="듣는 순서"
             options={REPEAT_ORDERS.map((o) => ({ ...o, disabled: o.value === "en" ? undefined : koBlocked }))}
             value={order}
             onChange={(repeatOrder) => onChange({ repeatOrder })}
           />
-        </RepeatRow>
+        </RepeatField>
         {bothLanguages && (
-          <RepeatRow label="사이 간격">
+          <RepeatField label={order === "ko-en" ? "한국어와 영어 사이" : "영어와 한국어 사이"}>
             <Segmented
               label="사이 간격"
               options={REPEAT_GAPS}
               value={gap}
               onChange={(repeatGap) => onChange({ repeatGap })}
             />
-          </RepeatRow>
+          </RepeatField>
         )}
-        <RepeatRow label="말할 시간">
+        <RepeatField label="반복 횟수">
           <Segmented
-            label="말할 시간"
+            label="반복 횟수"
+            options={REPEAT_COUNTS}
+            value={count}
+            onChange={(repeatCount) => onChange({ repeatCount })}
+          />
+        </RepeatField>
+        <RepeatField label="따라 말할 시간">
+          <Segmented
+            label="따라 말할 시간"
             options={SAY_TIMES}
             value={sayTime ? "on" : "off"}
             onChange={(v) => onChange({ repeatSayTime: v === "on" })}
           />
-        </RepeatRow>
+        </RepeatField>
       </div>
-      <p className="mt-3 break-keep text-xs text-muted">
-        {koBlocked && <>{koBlocked}. 영어만 반복해요. </>}
-        {summary}
-      </p>
     </div>
   );
 }
 
-function RepeatRow({ label, children }: { label: string; children: ReactNode }) {
+/**
+ * The repeat settings as a picture: [한국어] → 2초 → [영어] → [따라 말하기] × 3 → 다음 문장.
+ * Hidden from screen readers: the sentence under it says the same.
+ */
+function RepeatFlow({
+  order,
+  count,
+  gap,
+  sayTime,
+}: {
+  order: RepeatOrder;
+  count: RepeatCount;
+  gap: RepeatGap;
+  sayTime: boolean;
+}) {
+  const pause = gap === 0 ? undefined : gap === "fit" ? "문장 길이만큼" : `${gap}초`;
   return (
-    <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
-      <span className="shrink-0 text-xs font-semibold text-muted sm:w-16">{label}</span>
+    <div className="flex flex-wrap items-center gap-2" aria-hidden="true">
+      {/* The dashed box is one repetition. */}
+      <div className="inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-dashed border-muted/50 p-1.5">
+        {REPEAT_PARTS[order].map((part, k) => (
+          <Fragment key={part}>
+            {k > 0 && <FlowArrow label={pause} />}
+            {part === "ko" ? (
+              <FlowStep className="bg-raised text-ink">
+                <SpeakerIcon size={13} /> 한국어
+              </FlowStep>
+            ) : (
+              <FlowStep className="bg-accent-soft text-accent">
+                <HeadphonesIcon size={13} /> 영어
+              </FlowStep>
+            )}
+          </Fragment>
+        ))}
+        {sayTime && (
+          <>
+            <FlowArrow />
+            <FlowStep className="border border-dashed border-muted/60 text-muted">
+              <MicIcon size={13} /> 따라 말하기
+            </FlowStep>
+          </>
+        )}
+      </div>
+      <span className="text-sm font-bold tabular-nums">{count === 0 ? "× 계속" : `× ${count}`}</span>
+      {count !== 0 && (
+        <>
+          <FlowArrow />
+          <span className="text-xs font-semibold text-muted">다음 문장</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function FlowStep({ className, children }: { className: string; children: ReactNode }) {
+  return (
+    <span className={`inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs font-bold ${className}`}>{children}</span>
+  );
+}
+
+function FlowArrow({ label }: { label?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-muted">
+      {label}
+      <ArrowRightIcon size={12} />
+    </span>
+  );
+}
+
+function RepeatField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col items-start gap-2">
+      <span className="text-xs font-semibold text-muted">{label}</span>
       {children}
     </div>
+  );
+}
+
+/** An on/off switch that says which it is. */
+function Switch({ checked, onChange, label }: { checked: boolean; onChange: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={onChange}
+      className="inline-flex h-9 items-center gap-2 rounded-full pr-1 text-sm font-semibold"
+    >
+      <span
+        className={`flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors ${
+          checked ? "bg-accent" : "bg-line"
+        }`}
+      >
+        <span
+          className={`h-5 w-5 rounded-full bg-white shadow-sm transition-transform ${checked ? "translate-x-5" : ""}`}
+        />
+      </span>
+      <span className={checked ? "text-accent" : "text-muted"}>{checked ? "켜짐" : "꺼짐"}</span>
+    </button>
   );
 }
 
@@ -2187,10 +2400,11 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       onClick={() => onChange(!checked)}
-      className={`h-9 rounded-lg border px-3 font-medium transition ${
+      className={`inline-flex h-10 items-center gap-1.5 rounded-xl border px-3.5 font-medium transition ${
         checked ? "border-accent bg-accent-soft text-accent" : "border-line text-muted hover:bg-surface-2"
       }`}
     >
+      {checked && <CheckIcon size={14} />}
       {children}
     </button>
   );

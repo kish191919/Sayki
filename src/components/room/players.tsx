@@ -10,6 +10,11 @@ export interface PlayerHandle {
   getTime(): number;
   setRate(rate: number): void;
   isPlaying(): boolean;
+  /**
+   * Calls `listener` as playback moves on (a few times a second); returns how to stop.
+   * Unlike timers, these keep their pace while the page is in the background.
+   */
+  onProgress?(listener: () => void): () => void;
 }
 
 type PlayerProps = {
@@ -186,6 +191,14 @@ export function MediaPlayer({
     mediaRef.current = el;
   };
 
+  // A cached file can load before React has finished putting the room on the page; the
+  // `loadedmetadata` that arrives then restarts that render and its update is lost, which
+  // would leave every button disabled. So check once the player is on the page.
+  const handleReady = useEffectEvent(() => onReady?.());
+  useEffect(() => {
+    if ((mediaRef.current?.readyState ?? 0) >= HTMLMediaElement.HAVE_METADATA) handleReady();
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -203,6 +216,11 @@ export function MediaPlayer({
       isPlaying: () => {
         const v = mediaRef.current;
         return Boolean(v && !v.paused && !v.ended);
+      },
+      onProgress: (listener) => {
+        const v = mediaRef.current;
+        v?.addEventListener("timeupdate", listener);
+        return () => v?.removeEventListener("timeupdate", listener);
       },
     }),
     [],
