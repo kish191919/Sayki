@@ -12,6 +12,7 @@ import {
   stillBookmarked,
   subscribeBookmarks,
 } from "@/lib/bookmarks-client";
+import { hiddenRevision, stillShown, subscribeHidden } from "@/lib/hidden-client";
 import type { BookmarkedSentence, BookmarkGroup } from "@/lib/types";
 
 /** The bookmark revision this page's server data last caught up with (see `useCatchUp`). */
@@ -55,6 +56,8 @@ export default function BookmarkList({ groups }: { groups: BookmarkGroup[] }) {
   useCatchUp();
   // Removals (and their undo) show at once through the store; additions arrive with a refresh.
   useSyncExternalStore(subscribeBookmarks, bookmarkRevision, () => 0);
+  // Sentences deleted in the practice room since this page was rendered drop out too.
+  useSyncExternalStore(subscribeHidden, hiddenRevision, () => 0);
   const [query, setQuery] = useState("");
   const [notice, setNotice] = useState<{ text: string; bad: boolean; undo?: Removed } | null>(null);
   const noticeTimer = useRef<number | undefined>(undefined);
@@ -78,7 +81,10 @@ export default function BookmarkList({ groups }: { groups: BookmarkGroup[] }) {
   };
 
   const live = groups
-    .map((g) => ({ ...g, sentences: g.sentences.filter((s) => stillBookmarked(g.lesson.id, s.index)) }))
+    .map((g) => ({
+      ...g,
+      sentences: g.sentences.filter((s) => stillBookmarked(g.lesson.id, s.index) && stillShown(g.lesson.id, s.index)),
+    }))
     .filter((g) => g.sentences.length > 0);
   const sentenceCount = live.reduce((n, g) => n + g.sentences.length, 0);
 

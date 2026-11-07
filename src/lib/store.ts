@@ -27,6 +27,9 @@ interface LessonStore {
   getBookmarks(): Promise<Record<string, number>>;
   addBookmark(field: string, at: number): Promise<void>;
   removeBookmarks(fields: string[]): Promise<void>;
+  /** Sentences the learner deleted from a lesson (kept apart from the lesson, which translation rewrites). */
+  getHidden(lessonId: string): Promise<number[]>;
+  setHidden(lessonId: string, indexes: number[], hidden: boolean): Promise<void>;
   /** Increments a counter that expires after `ttlSeconds`; returns the new value. */
   bump(key: string, ttlSeconds: number): Promise<number>;
 }
@@ -56,6 +59,12 @@ const BOOKMARKS_KEY = "bookmarks";
 const MGET_CHUNK = 100;
 const lessonKey = (id: string) => `lesson:${id}`;
 const summaryKey = (id: string) => `lesson-summary:${id}`;
+/** A set of sentence indexes, so deleting and restoring sentences never race. */
+const hiddenKey = (id: string) => `lesson-hidden:${id}`;
+
+/** Sentence indexes as stored, cleaned up (sorted, no junk). */
+const indexList = (raw: unknown[]) =>
+  [...new Set(raw.map(Number).filter((i) => Number.isInteger(i) && i >= 0))].sort((a, b) => a - b);
 
 function redisStore(redis: Redis): LessonStore {
   const summaries = async (ids: string[]) => {
@@ -89,7 +98,7 @@ function redisStore(redis: Redis): LessonStore {
       if (ids.length === 0) return;
       await redis
         .pipeline()
-        .del(...ids.flatMap((id) => [lessonKey(id), summaryKey(id)]))
+        .del(...ids.flatMap((id) => [lessonKey(id), summaryKey(id), hiddenKey(id)]))
         .zrem(RECENT_KEY, ...ids)
         .exec();
     },
@@ -109,6 +118,15 @@ function redisStore(redis: Redis): LessonStore {
       if (fields.length === 0) return;
       await redis.hdel(BOOKMARKS_KEY, ...fields);
     },
+    async getHidden(lessonId) {
+      return indexList((await redis.smembers<unknown[]>(hiddenKey(lessonId))) ?? []);
+    },
+    async setHidden(lessonId, indexes, hidden) {
+      const [first, ...rest] = indexes;
+      if (first === undefined) return;
+      if (hidden) await redis.sadd(hiddenKey(lessonId), first, ...rest);
+      else await redis.srem(hiddenKey(lessonId), ...indexes);
+    },
     async bump(key, ttlSeconds) {
       const [count] = await redis.pipeline().incr(`counter:${key}`).expire(`counter:${key}`, ttlSeconds).exec<[number, number]>();
       return count;
@@ -123,6 +141,7 @@ function fileStore(dir: string): LessonStore {
   const libraryFile = path.join(dir, "library.json");
   const bookmarksFile = path.join(dir, "bookmarks.json");
   const fileFor = (id: string) => path.join(lessonDir, `${id}.json`);
+  const hiddenFileFor = (id: string) => path.join(dir, "hidden", `${id}.json`);
 
   const readJson = async <T,>(file: string): Promise<T | null> => {
     try {
@@ -168,7 +187,9 @@ function fileStore(dir: string): LessonStore {
     },
     all,
     async remove(ids) {
-      await Promise.all(ids.map((id) => fs.rm(fileFor(id), { force: true })));
+      await Promise.all(
+        ids.flatMap((id) => [fs.rm(fileFor(id), { force: true }), fs.rm(hiddenFileFor(id), { force: true })]),
+      );
     },
     getLibrary() {
       return readJson<LibraryState>(libraryFile);
@@ -188,6 +209,20 @@ function fileStore(dir: string): LessonStore {
       const all = (await readJson<Record<string, number>>(bookmarksFile)) ?? {};
       for (const f of fields) delete all[f];
       await writeJson(bookmarksFile, all);
+    },
+    async getHidden(lessonId) {
+      const raw = await readJson<unknown>(hiddenFileFor(lessonId));
+      return Array.isArray(raw) ? indexList(raw) : [];
+    },
+    // Local development only: read-modify-write is fine for one person.
+    async setHidden(lessonId, indexes, hidden) {
+      const raw = await readJson<unknown>(hiddenFileFor(lessonId));
+      const set = new Set(Array.isArray(raw) ? indexList(raw) : []);
+      for (const i of indexes) {
+        if (hidden) set.add(i);
+        else set.delete(i);
+      }
+      await writeJson(hiddenFileFor(lessonId), [...set].sort((a, b) => a - b));
     },
     async bump(key) {
       // Local development only: an in-memory counter is enough.
@@ -269,6 +304,16 @@ export async function addBookmark(field: string, at: number): Promise<void> {
 
 export async function removeBookmarks(fields: string[]): Promise<void> {
   await store().removeBookmarks(fields);
+}
+
+export async function getHiddenSentences(lessonId: string): Promise<number[]> {
+  if (!isLessonId(lessonId)) return [];
+  return store().getHidden(lessonId);
+}
+
+export async function setHiddenSentences(lessonId: string, indexes: number[], hidden: boolean): Promise<void> {
+  if (!isLessonId(lessonId)) throw new Error(`invalid lesson id: ${lessonId}`);
+  await store().setHidden(lessonId, indexes, hidden);
 }
 
 export async function bumpCounter(key: string, ttlSeconds: number): Promise<number> {

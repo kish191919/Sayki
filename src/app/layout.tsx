@@ -13,6 +13,9 @@ export const metadata: Metadata = {
     "유튜브 링크만 붙여 넣으면 문장 단위로 듣고, 따라 말하고, 바로 발음 점수를 받는 영어 쉐도잉 연습 서비스.",
   applicationName: "Sayki",
   robots: { index: false, follow: false }, // personal site
+  // iOS "홈 화면에 추가" → opens full-screen without Safari's UI. Icon: app/apple-icon.png.
+  appleWebApp: { capable: true, title: "Sayki", statusBarStyle: "default" },
+  formatDetection: { telephone: false },
 };
 
 export const viewport: Viewport = {

@@ -81,6 +81,12 @@ export const SpeakerIcon = (p: IconProps) => (
     <path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
   </Svg>
 );
+export const SpeakerOffIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M11 5 6 9H3v6h3l5 4z" fill="currentColor" />
+    <path d="m16 9 6 6M22 9l-6 6" />
+  </Svg>
+);
 export const CompareIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M8 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3M16 3h3a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-3M12 20V4" />

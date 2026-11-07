@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
-import { FileIcon, LinkIcon } from "@/components/icons";
+import { CloseIcon, FileIcon, LinkIcon } from "@/components/icons";
 
 const EXAMPLES = [
   { label: "TED · 미루는 습관", url: "https://www.youtube.com/watch?v=arj7oStGLkU" },
@@ -15,6 +15,7 @@ const NEEDS_FILE = new Set(["NO_CAPTIONS", "NEED_SUBTITLE", "YOUTUBE_BLOCKED", "
 export default function CreateLessonForm() {
   const router = useRouter();
   const fileInput = useRef<HTMLInputElement>(null);
+  const urlInput = useRef<HTMLInputElement>(null);
   const [url, setUrl] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [showFile, setShowFile] = useState(false);
@@ -52,6 +53,12 @@ export default function CreateLessonForm() {
     void create(url);
   };
 
+  const clearUrl = () => {
+    setUrl("");
+    setError(null);
+    urlInput.current?.focus();
+  };
+
   return (
     <div className="w-full">
       <form onSubmit={onSubmit} className="rounded-2xl border border-line bg-surface p-2 shadow-[0_8px_30px_-12px_rgba(0,0,0,0.18)]">
@@ -60,16 +67,34 @@ export default function CreateLessonForm() {
             <LinkIcon className="shrink-0 text-muted" />
             <span className="sr-only">영상 링크</span>
             <input
+              ref={urlInput}
               type="text"
               inputMode="url"
               autoComplete="off"
               spellCheck={false}
               value={url}
               onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && url) {
+                  e.preventDefault();
+                  clearUrl();
+                }
+              }}
               placeholder="유튜브 링크를 붙여 넣으세요"
               className="h-12 w-full min-w-0 bg-transparent text-base outline-none placeholder:text-muted"
               disabled={pending}
             />
+            {url && !pending && (
+              <button
+                type="button"
+                onClick={clearUrl}
+                aria-label="링크 지우기"
+                title="링크 지우기 (Esc)"
+                className="-mr-1 grid size-8 shrink-0 place-items-center rounded-full text-muted transition hover:bg-surface-2 hover:text-ink"
+              >
+                <CloseIcon size={16} />
+              </button>
+            )}
           </label>
           <button
             type="submit"

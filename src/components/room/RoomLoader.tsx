@@ -17,6 +17,8 @@ type Props = {
   bookmarks: RoomBookmarks;
   /** Sentence to open at instead of where practice last stopped. */
   startAt: number | null;
+  /** Sentences the learner deleted; null when they couldn't be loaded (deleting is off). */
+  hidden: number[] | null;
 };
 
 export default function RoomLoader(props: Props) {

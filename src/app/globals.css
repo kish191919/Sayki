@@ -78,6 +78,7 @@ body {
   color: var(--ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent; /* no grey flash on tap (feels native when installed) */
 }
 
 button:not(:disabled) {

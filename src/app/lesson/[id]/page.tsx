@@ -4,7 +4,7 @@ import { Suspense } from "react";
 import RoomLoader from "@/components/room/RoomLoader";
 import RoomSkeleton from "@/components/room/RoomSkeleton";
 import { bookmarkLessonOrder, listBookmarks } from "@/lib/bookmarks";
-import { getLesson } from "@/lib/store";
+import { getHiddenSentences, getLesson } from "@/lib/store";
 import { canTranslate } from "@/lib/translate";
 import type { Lesson } from "@/lib/types";
 
@@ -48,11 +48,16 @@ type Query = Record<string, string | string[] | undefined>;
 
 async function LessonContent({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Query> }) {
   const [{ id }, query] = await Promise.all([params, searchParams]);
-  const [lesson, bookmarks] = await Promise.all([
+  const [lesson, bookmarks, hidden] = await Promise.all([
     getLesson(id),
     // Practice works without bookmarks; the room just hides the button.
     listBookmarks().catch((e) => {
       console.error("bookmarks load failed", e);
+      return null;
+    }),
+    // Likewise without the deleted sentences: everything shows, and deleting is off.
+    getHiddenSentences(id).catch((e) => {
+      console.error("hidden sentences load failed", e);
       return null;
     }),
   ]);
@@ -89,6 +94,7 @@ async function LessonContent({ params, searchParams }: { params: Promise<{ id: s
         lesson={lesson}
         canTranslate={canTranslate()}
         startAt={startAt}
+        hidden={hidden}
         bookmarks={{
           indexes: bookmarks ? bookmarks.filter((b) => b.lessonId === lesson.id).map((b) => b.index) : null,
           only,

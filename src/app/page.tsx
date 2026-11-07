@@ -19,8 +19,13 @@ export default function Home() {
             <br />
             <span className="text-accent">원어민처럼</span> 말해 보세요
           </h1>
-          <p className="mt-5 max-w-xl break-keep text-base text-muted sm:text-lg">
-            유튜브 링크만 붙여 넣으면 끝. 한 문장씩 듣고, 따라 말하고, 바로 발음 점수를 받아요.
+          {/* 의미 단위로 줄을 나눔: PC·태블릿은 2줄, 좁은 모바일은 둘째 줄이 쉼표 뒤에서 한 번 더 나뉘어 3줄 */}
+          <p className="mt-5 break-keep text-base leading-relaxed text-muted sm:text-lg">
+            <span className="block">유튜브 링크만 붙여 넣으면 끝.</span>
+            <span className="block">
+              <span className="inline-block">한 문장씩 듣고, 따라 말하고,</span>{" "}
+              <span className="inline-block">바로 발음 점수를 받아요.</span>
+            </span>
           </p>
           <div className="mt-8 w-full text-left">
             <CreateLessonForm />

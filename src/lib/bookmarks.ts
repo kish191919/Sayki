@@ -1,6 +1,6 @@
 import "server-only";
 import { LessonError } from "./errors";
-import { addBookmark, getBookmarkMap, getLesson, isLessonId, removeBookmarks } from "./store";
+import { addBookmark, getBookmarkMap, getHiddenSentences, getLesson, isLessonId, removeBookmarks } from "./store";
 import type { Bookmark, BookmarkGroup } from "./types";
 
 /** No real lesson comes near this; it only keeps junk out of the hash. */
@@ -60,20 +60,26 @@ export async function forgetBookmarks(lessonIds: string[]): Promise<void> {
   await removeBookmarks(bookmarks.filter((b) => gone.has(b.lessonId)).map((b) => fieldOf(b.lessonId, b.index)));
 }
 
-/** Bookmarked sentences with their text, grouped by lesson (most recently bookmarked lesson first). */
+/**
+ * Bookmarked sentences with their text, grouped by lesson (most recently bookmarked lesson first).
+ * Sentences deleted from their lesson are left out (their bookmark returns if they're restored).
+ */
 export async function loadBookmarkGroups(): Promise<BookmarkGroup[]> {
   const bookmarks = await listBookmarks();
   const order = bookmarkLessonOrder(bookmarks);
-  const lessons = await Promise.all(order.map((id) => getLesson(id)));
+  const [lessons, hidden] = await Promise.all([
+    Promise.all(order.map((id) => getLesson(id))),
+    Promise.all(order.map((id) => getHiddenSentences(id).then((list) => new Set(list)))),
+  ]);
   const byLesson = new Map<string, Bookmark[]>();
   for (const b of bookmarks) byLesson.set(b.lessonId, [...(byLesson.get(b.lessonId) ?? []), b]);
 
   const groups: BookmarkGroup[] = [];
-  for (const lesson of lessons) {
+  for (const [k, lesson] of lessons.entries()) {
     // A lesson deleted elsewhere, or a sentence index the lesson no longer has, is skipped.
     if (!lesson) continue;
     const sentences = (byLesson.get(lesson.id) ?? [])
-      .filter((b) => b.index < lesson.sentences.length)
+      .filter((b) => b.index < lesson.sentences.length && !hidden[k].has(b.index))
       .sort((a, b) => a.index - b.index)
       .map((b) => {
         const s = lesson.sentences[b.index];

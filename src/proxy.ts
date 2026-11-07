@@ -36,6 +36,7 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Everything except build assets and the app icon.
-  matcher: ["/((?!_next/static|_next/image|icon.svg|favicon.ico).*)"],
+  // Everything except build assets, app icons and the web app manifest. Browsers fetch the
+  // manifest and home-screen icons without cookies, so they must not redirect to /login.
+  matcher: ["/((?!_next/static|_next/image|icon.svg|favicon.ico|apple-icon|icons/|manifest.webmanifest).*)"],
 };

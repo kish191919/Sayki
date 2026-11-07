@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   BookmarkIcon,
+  CheckIcon,
   ChevronDownIcon,
   CloseIcon,
   CompareIcon,
@@ -14,11 +15,14 @@ import {
   MicIcon,
   NextIcon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
   PrevIcon,
   ReplayIcon,
   SpeakerIcon,
+  SpeakerOffIcon,
   StopIcon,
+  TrashIcon,
 } from "@/components/icons";
 import {
   loadProgress,
@@ -34,6 +38,7 @@ import {
   type WaitMode,
 } from "@/lib/progress";
 import { bookmarkRevision, saveBookmark, subscribeBookmarks, withLocalChanges } from "@/lib/bookmarks-client";
+import { hiddenRevision, hiddenWithLocalChanges, saveHidden, subscribeHidden } from "@/lib/hidden-client";
 import { scoreAttempt, scoreTone, type Attempt } from "@/lib/score";
 import { pendingAiLines } from "@/lib/translation-state";
 import type { Lesson, RoomBookmarks } from "@/lib/types";
@@ -80,7 +85,6 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 
 const MODES: { value: PracticeMode; label: string }[] = [
   { value: "shadow", label: "듣고 따라 말하기" },
-  { value: "speak", label: "한국어 보고 영어로 말하기" },
   { value: "listen", label: "한국어 듣고 영어로 말하기" },
 ];
 
@@ -134,8 +138,8 @@ const SAY_IT = "지금 따라 말해 보세요";
 const SAY_IN_ENGLISH = "영어로 말해 보세요";
 const RECALL_MEANING = "뜻을 떠올려 보세요";
 
-/** "한국어를 읽어 주고 2초 뒤에 원어민 영어를 들려줘요. 3번 들려준 뒤 멈춰요." */
-function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap, advances: boolean) {
+/** "한국어를 읽어 주고 2초 뒤에 원어민 영어를 들려줘요. 3번 들려준 뒤 다음 문장으로 넘어가요." */
+function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap) {
   const pause = gap === 0 ? "바로" : gap === "fit" ? "문장 길이만큼 기다렸다가" : `${gap}초 뒤에`;
   const what = {
     en: "원어민 영어를 들려줘요.",
@@ -146,7 +150,7 @@ function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap, 
   const times =
     count === 0
       ? "반복을 끌 때까지 계속 되풀이해요."
-      : `${count === 1 ? "한 번" : `${count}번`} 들려준 뒤 ${advances ? "다음 문장으로 넘어가요" : "멈춰요"}.`;
+      : `${count === 1 ? "한 번" : `${count}번`} 들려준 뒤 다음 문장으로 넘어가요.`;
   return `${what} ${times}`;
 }
 
@@ -200,9 +204,11 @@ type RoomProps = {
   bookmarks: RoomBookmarks;
   /** Sentence to open at instead of where practice last stopped. */
   startAt: number | null;
+  /** Sentences the learner deleted; null when they couldn't be loaded (deleting is off). */
+  hidden: number[] | null;
 };
 
-export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt }: RoomProps) {
+export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt, hidden: hiddenOnServer }: RoomProps) {
   const { sentences } = lesson;
   const total = sentences.length;
   const needsTranslation = canTranslate && pendingAiLines(lesson).length > 0;
@@ -229,19 +235,36 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [best, setBest] = useState<Record<number, number>>(() => loadProgress(lesson.id).best);
   const [bestSpeak, setBestSpeak] = useState<Record<number, number>>(() => loadProgress(lesson.id).bestSpeak);
-  // Bookmarked sentences: what the server sent, plus changes made in this tab since — also
-  // ones made on the "북마크" page while this room waited in the back history.
+  // Deleted sentences — left out of practice and the list — and bookmarked ones: what the
+  // server sent, plus changes made in this tab since (also ones made on the "북마크" page
+  // while this room waited in the back history).
+  useSyncExternalStore(subscribeHidden, hiddenRevision, hiddenRevision);
   useSyncExternalStore(subscribeBookmarks, bookmarkRevision, bookmarkRevision);
+  const canHide = hiddenOnServer !== null;
+  const hidden = hiddenWithLocalChanges(lesson.id, hiddenOnServer ?? []);
+  for (const i of hidden) if (!(i < total)) hidden.delete(i);
+  /** The sentences that weren't deleted, in order. */
+  const visibleList = sentences.map((_, i) => i).filter((i) => !hidden.has(i));
+  const visibleCount = visibleList.length;
   const marked = withLocalChanges(lesson.id, bookmarks.indexes ?? []);
-  for (const i of marked) if (!(i < total)) marked.delete(i);
+  for (const i of marked) if (!(i < total) || hidden.has(i)) marked.delete(i);
+  /** `i`, or — if it was deleted — the next sentence that wasn't (else the one before). */
+  const nearestVisible = (i: number) =>
+    visibleList.find((j) => j >= i) ?? visibleList.findLast((j) => j < i) ?? i;
+
   /** "북마크만": go through the bookmarked sentences only. */
   const [onlyMarked, setOnlyMarked] = useState(bookmarks.only);
   const [bookmarkError, setBookmarkError] = useState<string | null>(null);
+  const [hideError, setHideError] = useState<string | null>(null);
+  /** A sentence just deleted from the card (or with the shortcut), offered back for a moment. */
+  const [undoHide, setUndoHide] = useState<{ index: number } | null>(null);
+  /** The sentence list is in "편집": tapping a sentence deletes or restores it. */
+  const [editing, setEditing] = useState(false);
   const [current, setCurrent] = useState(() => {
-    if (startAt != null) return startAt;
+    if (startAt != null) return nearestVisible(startAt);
     // Bookmarked-only practice starts from the first bookmarked sentence.
     if (bookmarks.only && marked.size > 0) return Math.min(...marked);
-    return Math.min(Math.max(0, loadProgress(lesson.id).last || 0), total - 1);
+    return nearestVisible(Math.min(Math.max(0, loadProgress(lesson.id).last || 0), total - 1));
   });
   const [playing, setPlaying] = useState(false);
   const [wait, setWait] = useState<{ key: number; ms: number; label: string } | null>(null);
@@ -261,11 +284,12 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   /** Listen mode: the sentence whose hidden Korean was opened as text. */
   const [koRevealed, setKoRevealed] = useState<number | null>(null);
   /** Listen mode: a sentence to read aloud once its Korean (or the voice) is ready. */
-  const pendingRead = useRef<number | null>(settings.mode === "listen" ? current : null);
+  const pendingRead = useRef<number | null>(settings.mode === "listen" && !settings.koMuted ? current : null);
 
-  /** Either Korean → English mode: the Korean is read ("speak") or heard ("listen"). */
-  const speak = settings.mode !== "shadow";
-  const listening = settings.mode === "listen";
+  /** Korean → English mode. */
+  const speak = settings.mode === "listen";
+  /** Korean → English mode reads each sentence's Korean aloud (it isn't muted). */
+  const listening = speak && !settings.koMuted;
   /** Bookmarked-only practice is on, and there's something to practice. */
   const filtered = onlyMarked && marked.size > 0;
   /**
@@ -284,12 +308,14 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
 
   const canBookmark = bookmarks.indexes !== null;
   const markedList = [...marked].sort((a, b) => a - b);
-  /** The sentence after `i` (null at the end) — only bookmarked ones in "북마크만" practice. */
+  // (Two lookups rather than one on `filtered ? markedList : visibleList`: React Compiler
+  // can't follow that alias and then treats every handler as running during render.)
+  /** The sentence after `i` (null at the end), skipping deleted ones — and, in "북마크만", unbookmarked ones. */
   const nextOf = (i: number): number | null =>
-    filtered ? (markedList.find((m) => m > i) ?? null) : i + 1 < total ? i + 1 : null;
-  /** The sentence before `i` (null at the start) — only bookmarked ones in "북마크만" practice. */
+    (filtered ? markedList.find((m) => m > i) : visibleList.find((m) => m > i)) ?? null;
+  /** The sentence before `i` (null at the start), skipping deleted ones — and, in "북마크만", unbookmarked ones. */
   const prevOf = (i: number): number | null =>
-    filtered ? (markedList.findLast((m) => m < i) ?? null) : i > 0 ? i - 1 : null;
+    (filtered ? markedList.findLast((m) => m < i) : visibleList.findLast((m) => m < i)) ?? null;
 
   const toggleBookmark = (i: number) => {
     if (!canBookmark) return;
@@ -307,7 +333,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     setOnlyMarked(only);
     if (!only || marked.has(current) || recorder.status !== "idle") return;
     const target = markedList.find((m) => m > current) ?? markedList[0];
-    // Moving there shouldn't start the video; Korean → English modes move as usual.
+    // Moving there shouldn't start the video; Korean → English mode moves as usual.
     if (speak) goTo(target);
     else {
       pause();
@@ -315,6 +341,68 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       setCurrent(target);
     }
   };
+
+  /* ---------------------------- deleted sentences ---------------------------- */
+
+  /** Why sentence `i` can't be deleted right now, if it can't. */
+  const hideBlocked = (i: number): string | undefined => {
+    if (!canHide || hidden.has(i)) return undefined;
+    if (visibleCount <= 1) return "마지막 남은 문장은 삭제할 수 없어요";
+    if (i === current && recorder.status !== "idle") return "녹음이 끝난 뒤에 삭제할 수 있어요";
+    return undefined;
+  };
+
+  /**
+   * Deletes a sentence from practice — it stops showing up, here and next time — or brings
+   * it back. Deleting the current sentence moves on (playing on if something was playing).
+   * Returns whether anything changed.
+   */
+  const setHiddenAt = (i: number, on: boolean): boolean => {
+    if (!canHide || hidden.has(i) === on || (on && hideBlocked(i))) return false;
+    // A bookmark on it stays, just out of sight (here and on the "북마크" page) until it's restored.
+    if (on) {
+      if (i === current) {
+        const target =
+          nextOf(i) ?? prevOf(i) ?? visibleList.find((m) => m > i) ?? visibleList.findLast((m) => m < i) ?? i;
+        if (running) goTo(target);
+        else {
+          pause();
+          stopMine();
+          stopKorean();
+          setCurrent(target);
+        }
+      }
+    }
+    setHideError(null);
+    saveHidden(lesson.id, [i], on).catch((e: Error) => setHideError(e.message));
+    return true;
+  };
+
+  /** "삭제" on the card (or the Delete key): deletes the current sentence, with a way back. */
+  const deleteCurrent = () => {
+    const i = current;
+    if (setHiddenAt(i, true)) setUndoHide({ index: i });
+  };
+
+  const undoDelete = () => {
+    if (!undoHide) return;
+    const { index } = undoHide;
+    setUndoHide(null);
+    if (!setHiddenAt(index, false)) return;
+    // Back to where it was, without playing it.
+    if (recorder.status === "idle") {
+      pause();
+      stopMine();
+      stopKorean();
+      setCurrent(index);
+    }
+  };
+
+  useEffect(() => {
+    if (!undoHide) return;
+    const id = setTimeout(() => setUndoHide(null), 8000);
+    return () => clearTimeout(id);
+  }, [undoHide]);
 
   /* ------------------------------ timing helpers ----------------------------- */
 
@@ -463,6 +551,8 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   // the run on through this ref, so it follows the latest settings (e.g. a new count).
   const repeatLatest = useRef<(() => void) | null>(null);
   const resumeRepeat = () => repeatLatest.current?.();
+  /** A run that played its last repetition moves on from sentence `i` (see the effect below). */
+  const advanceLatest = useRef<((i: number) => void) | null>(null);
 
   /** Plays the run's next part — or, after the last one, the next repetition or sentence. */
   const runRepeat = () => {
@@ -493,21 +583,17 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       return;
     }
 
-    // This repetition is over: repeat the sentence, move on (as the wait mode does), or stop.
+    // This repetition is over: repeat the sentence again or, after the last one, move on
+    // to the next sentence (stopping at the end).
     const count = settings.repeatCount;
-    const following = !speak && settings.waitMode !== "manual" ? nextOf(i) : null;
-    const next: Repeat | null =
-      count === 0 || run.round < count
-        ? { index: i, round: run.round + 1, step: 0, rested: false }
-        : following !== null
-          ? { index: following, round: 1, step: 0, rested: false }
-          : null;
-    if (!next) return endRepeat();
+    const again = count === 0 || run.round < count;
+    if (!again && nextOf(i) === null) return endRepeat();
     const go = () => {
       if (engine.current.repeat !== run) return;
+      if (!again) return advanceLatest.current?.(i);
+      const next: Repeat = { index: i, round: run.round + 1, step: 0, rested: false };
       engine.current.repeat = next;
       setRepeatRound(next.round);
-      setCurrent(next.index);
       resumeRepeat();
     };
     const ms = sayTimeMs(i);
@@ -532,7 +618,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const toggleKorean = () => (koSpeech.speaking ? stopKorean() : readKorean(current));
 
   /**
-   * Moves to a sentence. In Korean → English modes it must not play (that would reveal
+   * Moves to a sentence. In Korean → English mode it must not play (that would reveal
    * the answer); listen mode reads the new sentence's Korean instead.
    */
   const goTo = (i: number) => {
@@ -571,7 +657,20 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     stopMine();
     stopKorean();
     update({ mode });
-    if (mode === "listen") readKorean(current);
+    if (mode === "listen" && !settings.koMuted) readKorean(current);
+  };
+
+  /** Muted, listen mode shows each sentence's Korean as text instead of reading it aloud. */
+  const toggleKoMuted = () => {
+    const koMuted = !settings.koMuted;
+    update({ koMuted });
+    if (koMuted) {
+      pendingRead.current = null;
+      // A repeat run reads Korean by its own settings: leave it be.
+      if (!engine.current.repeat) koSpeech.stop();
+    }
+    // The sentence on screen was just read as text: keep it open rather than blur it again.
+    else setKoRevealed(current);
   };
 
   /** "이 문장 반복": switching it on starts the current sentence right away. */
@@ -596,6 +695,13 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const afterWaitLatest = useRef<((i: number) => void) | null>(null);
   useEffect(() => {
     repeatLatest.current = runRepeat;
+    advanceLatest.current = (i) => {
+      const next = nextOf(i);
+      if (next === null) return endRepeat();
+      // Repeats the next sentence the same way. In Korean → English mode, a repetition that
+      // starts with the English (the answer) waits for the learner instead: see `goTo`.
+      goTo(next);
+    };
     afterWaitLatest.current = (i) => {
       if (settings.loop) play(i);
       // Never run on to the next sentence in Korean → English mode: its audio is the answer.
@@ -650,11 +756,21 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       endRepeat();
       stopKorean();
       e.once = false;
+      // A deleted sentence is skipped: on to the next one that wasn't deleted.
+      const k = hidden.has(j) ? (visibleList.find((m) => m > j) ?? null) : j;
+      if (k === null) {
+        // Only deleted sentences are left.
+        p.pause();
+        e.pausedAt = performance.now();
+        return;
+      }
       // While repeating, stop at the sentence's end: the run picks it up from there.
       e.mode = continuousPlay && !settings.loop ? "continuous" : "segment";
-      e.index = j;
-      e.armed = true;
-      setCurrent(j);
+      e.index = k;
+      e.armed = k === j;
+      e.armDeadline = performance.now() + 1500;
+      if (k !== j) p.seek(startOf(k));
+      setCurrent(k);
       return;
     }
 
@@ -667,10 +783,24 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
 
     if (e.mode === "continuous") {
       const j = indexAt(t);
-      if (j !== e.index) {
-        e.index = j;
-        setCurrent(j);
+      if (j === e.index) return;
+      // Deleted sentences were just skipped and the seek landed a little early: wait for it.
+      if (j < e.index && hidden.has(j) && t >= start - 1.5) return;
+      const k = hidden.has(j) ? (visibleList.find((m) => m > j) ?? null) : j;
+      if (k === null) {
+        // Only deleted sentences are left.
+        p.pause();
+        e.mode = "idle";
+        e.pausedAt = performance.now();
+        return;
       }
+      if (k !== j) {
+        p.seek(startOf(k));
+        e.armed = false;
+        e.armDeadline = performance.now() + 1500;
+      }
+      e.index = k;
+      setCurrent(k);
       return;
     }
 
@@ -681,8 +811,21 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
         e.afterEnd = null;
       }
       const j = indexAt(t);
-      e.index = j;
-      setCurrent(j);
+      const k = hidden.has(j) ? (visibleList.find((m) => m > j) ?? null) : j;
+      if (k === null) {
+        p.pause();
+        e.mode = "idle";
+        e.afterEnd = null;
+        e.pausedAt = performance.now();
+        return;
+      }
+      if (k !== j) {
+        p.seek(startOf(k));
+        e.armed = false;
+        e.armDeadline = performance.now() + 1500;
+      }
+      e.index = k;
+      setCurrent(k);
       return;
     }
     if (t >= end - 0.03) {
@@ -827,7 +970,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     if (!sentencesOpen || !list || !item) return;
     const top = item.offsetTop - list.clientHeight / 2 + item.clientHeight / 2;
     list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-  }, [current, sentencesOpen, filtered]);
+  }, [current, sentencesOpen, filtered, editing]);
 
   useEffect(() => {
     const e = engine.current;
@@ -862,6 +1005,11 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       case "B":
         toggleBookmark(current);
         break;
+      case "Delete":
+      case "Backspace":
+        ev.preventDefault();
+        deleteCurrent();
+        break;
       case "r":
       case "R":
         ev.preventDefault();
@@ -878,6 +1026,10 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       case "k":
       case "K":
         if (speak) toggleKorean();
+        break;
+      case "m":
+      case "M":
+        if (speak && koSpeech.supported) toggleKoMuted();
         break;
     }
   });
@@ -896,10 +1048,12 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const attempt = attemptState?.attempt ?? null;
   const showEnglish = settings.showText || revealed === current;
   const modeBest = speak ? bestSpeak : best;
-  const practicedCount = Object.keys(modeBest).length;
-  const average = practicedCount
-    ? Math.round(Object.values(modeBest).reduce((a, b) => a + b, 0) / practicedCount)
-    : null;
+  // Deleted sentences don't count towards progress.
+  const keptScores = Object.entries(modeBest)
+    .filter(([i]) => !hidden.has(Number(i)))
+    .map(([, score]) => score);
+  const practicedCount = keptScores.length;
+  const average = practicedCount ? Math.round(keptScores.reduce((a, b) => a + b, 0) / practicedCount) : null;
   const recording = recorder.status === "recording" || recorder.status === "starting";
   const busy = recorder.status !== "idle";
   const waitMode = WAIT_MODES.find((m) => m.value === settings.waitMode);
@@ -925,9 +1079,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   /** Why the repeat settings can't read Korean aloud here, if they can't. */
   const repeatKoBlocked = noVoice ? "이 브라우저는 음성 읽기를 지원하지 않아요" : speakUnavailable ? NO_KOREAN : undefined;
   const repeatOrder = repeatKoBlocked ? "en" : settings.repeatOrder;
-  /** After its last repetition a sentence moves on (as the wait mode does) instead of stopping. */
-  const repeatAdvances = !speak && settings.waitMode !== "manual";
-  const repeatSummary = describeRepeat(repeatOrder, settings.repeatCount, settings.repeatGap, repeatAdvances);
+  const repeatSummary = describeRepeat(repeatOrder, settings.repeatCount, settings.repeatGap);
   const repeatTag =
     settings.repeatCount === 0
       ? "∞"
@@ -969,7 +1121,11 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   );
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+    <div
+      className={`grid gap-6 ${
+        sentencesOpen ? "lg:grid-cols-[minmax(0,1fr)_380px]" : "lg:grid-cols-[minmax(0,1fr)_3rem]"
+      }`}
+    >
       <section className="min-w-0 space-y-4">
         {/* Video — height-capped on desktop so the practice controls stay on screen. */}
         <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-sm lg:max-h-[max(18rem,calc(100dvh_-_34rem))]">
@@ -1031,6 +1187,19 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                   {currentMarked ? "북마크됨" : "북마크"}
                 </button>
               )}
+              {canHide && (
+                <button
+                  type="button"
+                  onClick={deleteCurrent}
+                  disabled={Boolean(hideBlocked(current))}
+                  aria-label="이 문장 삭제 (Del) — 다음부터 보이지 않아요"
+                  title={hideBlocked(current) ?? "이 문장 삭제 (Del) — 다음부터 보이지 않아요"}
+                  className="inline-flex h-7 items-center gap-1 rounded-full border border-line px-2.5 text-xs font-semibold text-muted transition enabled:hover:bg-bad-soft enabled:hover:text-bad disabled:opacity-40"
+                >
+                  <TrashIcon size={14} />
+                  삭제
+                </button>
+              )}
               {modeBest[current] != null && (
                 <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE_BG[scoreTone(modeBest[current])]}`}>
                   {speak ? `최고 일치율 ${modeBest[current]}%` : `최고 ${modeBest[current]}점`}
@@ -1040,10 +1209,8 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
             <ModeSwitch
               value={settings.mode}
               onChange={switchMode}
-              disabled={{
-                speak: speakUnavailable ? NO_KOREAN : undefined,
-                listen: speakUnavailable ? NO_KOREAN : noVoice ? "이 브라우저는 음성 읽기를 지원하지 않아요" : undefined,
-              }}
+              // Without a voice the mode still works: it shows the Korean as text.
+              disabled={{ listen: speakUnavailable ? NO_KOREAN : undefined }}
             />
           </div>
           {filtered && (
@@ -1073,6 +1240,20 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
             </div>
           )}
           {bookmarkError && <p className="-mt-2 mb-3 text-xs text-bad">{bookmarkError}</p>}
+          {hideError && <p className="-mt-2 mb-3 text-xs text-bad">{hideError}</p>}
+          {undoHide && (
+            <div
+              role="status"
+              className="-mt-1 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-surface-2 px-3 py-2 text-xs font-semibold text-muted"
+            >
+              <span className="break-keep">
+                {undoHide.index + 1}번 문장을 삭제했어요. 다음부터 보이지 않아요.
+              </span>
+              <button type="button" onClick={undoDelete} className="ml-auto text-ink underline">
+                되돌리기
+              </button>
+            </div>
+          )}
           {translate.status === "working" && (
             <p className="-mt-2 mb-3 flex items-center gap-2 text-xs font-semibold text-muted">
               <span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> AI가 문장별 한글 해석을 만드는 중…
@@ -1089,9 +1270,28 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
 
           {speak ? (
             <>
-              <p className="text-xs font-semibold text-accent">
-                {listening ? "한국어를 듣고 영어로 말해 보세요" : "이 뜻을 영어로 말해 보세요"}
-              </p>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold text-accent">
+                  {listening ? "한국어를 듣고 영어로 말해 보세요" : "이 뜻을 영어로 말해 보세요"}
+                </p>
+                {!noVoice && (
+                  <button
+                    type="button"
+                    onClick={toggleKoMuted}
+                    aria-pressed={settings.koMuted}
+                    aria-label={settings.koMuted ? "한국어 음소거 해제 (M)" : "한국어 음소거 (M) — 읽어 주지 않고 글로 보여 줘요"}
+                    title={settings.koMuted ? "한국어 음소거 해제 (M)" : "한국어 음소거 (M) — 읽어 주지 않고 글로 보여 줘요"}
+                    className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-xs font-semibold transition ${
+                      settings.koMuted
+                        ? "border-accent bg-accent-soft text-accent"
+                        : "border-line text-muted hover:bg-surface-2 hover:text-ink"
+                    }`}
+                  >
+                    {settings.koMuted ? <SpeakerOffIcon size={14} /> : <SpeakerIcon size={14} />}
+                    {settings.koMuted ? "음소거됨" : "음소거"}
+                  </button>
+                )}
+              </div>
               {listening && noVoice && (
                 <p className="mt-1 text-xs text-muted">이 브라우저는 음성 읽기를 지원하지 않아 글로 보여 드려요.</p>
               )}
@@ -1446,14 +1646,17 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
               <p className="text-xs text-muted sm:col-span-2">
                 {speak ? (
                   <>
-                    단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>K</Kbd> 한국어 듣기 · <Kbd>H</Kbd> 힌트 ·{" "}
+                    단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>K</Kbd> 한국어 듣기
+                    {!noVoice && <> · <Kbd>M</Kbd> 한국어 음소거</>} · <Kbd>H</Kbd> 힌트 ·{" "}
                     <Kbd>Space</Kbd> 원어민 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복
                     {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
+                    {canHide && <> · <Kbd>Del</Kbd> 문장 삭제</>}
                   </>
                 ) : (
                   <>
                     단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
                     {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
+                    {canHide && <> · <Kbd>Del</Kbd> 문장 삭제</>}
                   </>
                 )}
                 <span className="block sm:ml-1 sm:inline">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
@@ -1463,9 +1666,28 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
         </div>
       </section>
 
-      {/* Sentence list */}
+      {/* Sentence list — on desktop it folds into a slim rail on the right so the practice column widens;
+          stacked under the video on small screens, it folds upward instead. */}
       <aside className="min-w-0 lg:sticky lg:top-20 lg:self-start">
-        <div className="overflow-hidden rounded-2xl border border-line bg-surface shadow-sm">
+        {!sentencesOpen && (
+          <button
+            type="button"
+            onClick={() => update({ sentencesOpen: true })}
+            aria-expanded={false}
+            aria-controls="room-sentences"
+            title="문장 목록 펼치기"
+            className="hidden w-full flex-col items-center gap-3 rounded-2xl border border-line bg-surface py-4 text-muted shadow-sm transition hover:bg-surface-2 hover:text-ink lg:flex"
+          >
+            <ChevronDownIcon size={18} className="shrink-0 rotate-90" />
+            <span className="font-bold text-ink [writing-mode:vertical-rl]">{filtered ? "북마크한 문장" : "전체 문장"}</span>
+            <span className="text-xs tabular-nums [writing-mode:vertical-rl]">
+              {practicedCount}/{visibleCount}
+            </span>
+          </button>
+        )}
+        <div
+          className={`overflow-hidden rounded-2xl border border-line bg-surface shadow-sm ${sentencesOpen ? "" : "lg:hidden"}`}
+        >
           <h2>
             <button
               type="button"
@@ -1474,38 +1696,70 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
               aria-controls="room-sentences"
               className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-surface-2"
             >
-              <span className="font-bold">{filtered ? "북마크한 문장" : "전체 문장"}</span>
+              <span className="font-bold">{editing ? "문장 편집" : filtered ? "북마크한 문장" : "전체 문장"}</span>
               <span className="flex items-center gap-2 text-xs text-muted">
                 <span>
-                  연습 {practicedCount}/{total}
+                  연습 {practicedCount}/{visibleCount}
                   {average != null && <> · 평균 {average}{speak ? "%" : "점"}</>}
                 </span>
-                <Chevron open={sentencesOpen} />
+                {/* Points up on small screens (folds upward), right on desktop (folds into the rail). */}
+                <ChevronDownIcon
+                  size={18}
+                  className={`shrink-0 transition-transform ${sentencesOpen ? "rotate-180 lg:-rotate-90" : ""}`}
+                />
               </span>
             </button>
           </h2>
-          {sentencesOpen && canBookmark && (
-            <div className="flex gap-1 border-t border-line px-2 pt-2" role="tablist" aria-label="문장 보기">
-              {[
-                { only: false, label: "전체", count: total },
-                { only: true, label: "북마크", count: markedList.length },
-              ].map((tab) => (
+          {sentencesOpen && (canBookmark || canHide) && (
+            <div className="flex items-center gap-1 border-t border-line px-2 pt-2">
+              {editing ? (
+                <p className="min-w-0 flex-1 break-keep px-1 text-xs text-muted">
+                  필요 없는 문장을 누르면 삭제돼요. 다시 누르면 되돌려요.
+                  {hidden.size > 0 && <span className="font-semibold text-ink"> {hidden.size}문장 삭제됨</span>}
+                </p>
+              ) : (
+                canBookmark && (
+                  <div className="flex gap-1" role="tablist" aria-label="문장 보기">
+                    {[
+                      { only: false, label: "전체", count: visibleCount },
+                      { only: true, label: "북마크", count: markedList.length },
+                    ].map((tab) => (
+                      <button
+                        key={tab.label}
+                        type="button"
+                        role="tab"
+                        aria-selected={filtered === tab.only}
+                        onClick={() => showOnlyMarked(tab.only)}
+                        disabled={tab.only && tab.count === 0}
+                        title={tab.only && tab.count === 0 ? "북마크한 문장이 아직 없어요" : undefined}
+                        className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:opacity-40 ${
+                          filtered === tab.only ? "bg-surface-2 text-ink" : "text-muted hover:text-ink"
+                        }`}
+                      >
+                        {tab.only && <BookmarkIcon size={13} filled={filtered} />}
+                        {tab.label} <span className="tabular-nums">{tab.count}</span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              )}
+              {canHide && (
                 <button
-                  key={tab.label}
                   type="button"
-                  role="tab"
-                  aria-selected={filtered === tab.only}
-                  onClick={() => showOnlyMarked(tab.only)}
-                  disabled={tab.only && tab.count === 0}
-                  title={tab.only && tab.count === 0 ? "북마크한 문장이 아직 없어요" : undefined}
-                  className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:opacity-40 ${
-                    filtered === tab.only ? "bg-surface-2 text-ink" : "text-muted hover:text-ink"
+                  onClick={() => setEditing((on) => !on)}
+                  aria-pressed={editing}
+                  title={editing ? "편집 마치기" : "필요 없는 문장 삭제하기"}
+                  className={`ml-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition ${
+                    editing ? "bg-accent text-on-accent hover:bg-accent-strong" : "text-muted hover:bg-surface-2 hover:text-ink"
                   }`}
                 >
-                  {tab.only && <BookmarkIcon size={13} filled={filtered} />}
-                  {tab.label} <span className="tabular-nums">{tab.count}</span>
+                  {editing ? <CheckIcon size={14} /> : <PencilIcon size={13} />}
+                  {editing ? "완료" : "편집"}
+                  {!editing && hidden.size > 0 && (
+                    <span className="font-normal tabular-nums">· 삭제 {hidden.size}</span>
+                  )}
                 </button>
-              ))}
+              )}
             </div>
           )}
           {sentencesOpen && (
@@ -1513,19 +1767,22 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
               id="room-sentences"
               ref={listRef}
               className={`relative max-h-[55vh] overflow-y-auto p-2 lg:max-h-[calc(100dvh-13rem)] ${
-                canBookmark ? "" : "border-t border-line"
+                canBookmark || canHide ? "" : "border-t border-line"
               }`}
             >
               {sentences.map((s, i) => {
+                const isHidden = hidden.has(i);
                 const isMarked = marked.has(i);
-                if (filtered && !isMarked) return null;
+                // "편집" shows every sentence, deleted ones too, so they can be brought back.
+                if (!editing && (isHidden || (filtered && !isMarked))) return null;
                 const score = modeBest[i];
                 const active = i === current;
                 const lineKo = koOf(i);
                 const englishOpen = !speak || answerShown.has(i);
+                const blocked = editing ? hideBlocked(i) : undefined;
                 return (
                   <li key={i} data-index={i} className="relative">
-                    {canBookmark && (
+                    {canBookmark && !editing && (
                       <button
                         type="button"
                         onClick={() => toggleBookmark(i)}
@@ -1541,16 +1798,18 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                     )}
                     <button
                       type="button"
-                      onClick={() => goTo(i)}
-                      disabled={!ready}
-                      className={`flex w-full gap-3 rounded-xl py-2.5 pl-3 text-left text-sm transition ${
-                        canBookmark ? "pr-10" : "pr-3"
-                      } ${active ? "bg-accent-soft" : "hover:bg-surface-2"}`}
+                      onClick={() => (editing ? setHiddenAt(i, !isHidden) : goTo(i))}
+                      disabled={editing ? Boolean(blocked) : !ready}
+                      aria-pressed={editing ? isHidden : undefined}
+                      title={editing ? (blocked ?? (isHidden ? "눌러서 되돌리기" : "눌러서 삭제")) : undefined}
+                      className={`flex w-full gap-3 rounded-xl py-2.5 pl-3 text-left text-sm transition disabled:cursor-not-allowed ${
+                        canBookmark && !editing ? "pr-10" : "pr-3"
+                      } ${active && !isHidden ? "bg-accent-soft" : "hover:bg-surface-2"}`}
                     >
                       <span className={`w-6 shrink-0 pt-0.5 text-xs tabular-nums ${active ? "font-bold text-accent" : "text-muted"}`}>
                         {i + 1}
                       </span>
-                      <span className="min-w-0 flex-1">
+                      <span className={`min-w-0 flex-1 ${isHidden ? "line-through opacity-45" : ""}`}>
                         {speak ? (
                           <>
                             <span
@@ -1580,11 +1839,22 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                           </>
                         )}
                       </span>
-                      {score != null && (
+                      {score != null && !isHidden && (
                         <span className={`h-fit shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${TONE_BG[scoreTone(score)]}`}>
                           {score}
                         </span>
                       )}
+                      {editing &&
+                        (isHidden ? (
+                          <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full bg-surface-2 px-2 text-[11px] font-semibold text-ink">
+                            <ReplayIcon size={12} /> 되돌리기
+                          </span>
+                        ) : (
+                          <span className="inline-flex size-6 shrink-0 items-center justify-center text-muted" aria-hidden="true">
+                            <TrashIcon size={15} />
+                          </span>
+                        ))}
+                      {editing && <span className="sr-only">{isHidden ? "삭제됨, 눌러서 되돌리기" : "눌러서 삭제"}</span>}
                     </button>
                   </li>
                 );

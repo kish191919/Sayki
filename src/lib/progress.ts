@@ -6,10 +6,10 @@
 export type WaitMode = "manual" | "auto1" | "auto15" | "continuous";
 
 /**
- * shadow: listen, then repeat. speak: read the Korean, say the English.
- * listen: hear the Korean read aloud, say the English (scores shared with speak).
+ * shadow: listen, then repeat. listen: hear the Korean read aloud (or, muted, read it)
+ * and say the English.
  */
-export type PracticeMode = "shadow" | "speak" | "listen";
+export type PracticeMode = "shadow" | "listen";
 
 /** How many times a sentence plays while repeating; 0 = until repeating is switched off. */
 export type RepeatCount = 0 | 1 | 2 | 3 | 5;
@@ -30,6 +30,8 @@ export type Settings = {
   repeatGap: RepeatGap;
   showText: boolean;
   showKorean: boolean;
+  /** Listen mode doesn't read each sentence's Korean aloud: it shows it as text instead. */
+  koMuted: boolean;
   /** Subtitle timing offset in seconds (positive = subtitles later). */
   offset: number;
   /** The "전체 문장" panel is expanded. */
@@ -48,6 +50,7 @@ export const DEFAULT_SETTINGS: Settings = {
   repeatGap: 2,
   showText: true,
   showKorean: true,
+  koMuted: false,
   offset: 0,
   sentencesOpen: true,
   settingsOpen: false,
@@ -56,7 +59,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export type LessonProgress = {
   /** Best shadowing score per sentence. */
   best: Record<number, number>;
-  /** Best match rate per sentence in the Korean → English modes (read or heard). */
+  /** Best match rate per sentence in the Korean → English mode. */
   bestSpeak: Record<number, number>;
   last: number;
 };
@@ -92,7 +95,12 @@ function write(key: string, value: unknown) {
   }
 }
 
-export const loadSettings = () => read<Settings>(SETTINGS_KEY, DEFAULT_SETTINGS);
+export function loadSettings(): Settings {
+  const s = read<Settings>(SETTINGS_KEY, DEFAULT_SETTINGS);
+  // The old "한국어 보고 영어로 말하기" mode is listen mode with the Korean muted.
+  if ((s.mode as string) === "speak") return { ...s, mode: "listen", koMuted: true };
+  return s;
+}
 export const saveSettings = (s: Settings) => write(SETTINGS_KEY, s);
 
 export const loadProgress = (id: string) =>
