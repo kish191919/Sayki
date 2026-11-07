@@ -2,8 +2,10 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { forgetBookmarks } from "./bookmarks";
 import { LessonError } from "./errors";
-import { deleteLessons, isLessonId, loadLibrary, saveLibrary } from "./store";
-import { FOLDER_NAME_MAX, type LibraryState } from "./types";
+import { deleteScriptAudio } from "./script-audio";
+import { deleteLessons, getLesson, isFileLessonId, isLessonId, isScriptLessonId, loadLibrary, saveLibrary } from "./store";
+import { deleteUploadedMedia } from "./uploads";
+import { FOLDER_NAME_MAX, type Lesson, type LibraryState } from "./types";
 
 const MAX_FOLDERS = 100;
 const MAX_IDS = 1000;
@@ -95,7 +97,13 @@ export async function applyLibraryOp(body: unknown): Promise<{ library: LibraryS
     }
     case "deleteLessons": {
       const ids = lessonIds(input.lessonIds, true);
+      // Script and uploaded-file lessons keep their media apart from the lesson: look them up before they go.
+      const withMedia = await Promise.all(
+        ids.filter((id) => isScriptLessonId(id) || isFileLessonId(id)).map((id) => getLesson(id)),
+      );
       await deleteLessons(ids);
+      const gone = withMedia.filter((l): l is Lesson => l !== null);
+      await Promise.all([deleteScriptAudio(gone), deleteUploadedMedia(gone)]);
       await forgetBookmarks(ids);
       next = { ...library, placement: place(library.placement, ids, null) };
       break;

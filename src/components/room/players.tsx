@@ -166,43 +166,71 @@ export function YouTubePlayer({ videoId, ref, onReady, onError }: PlayerProps & 
   return <div ref={hostRef} className="absolute inset-0 [&_iframe]:h-full [&_iframe]:w-full" />;
 }
 
-/* ------------------------------ HTML5 <video> ------------------------------ */
+/* --------------------------- HTML5 <video> / <audio> ------------------------ */
 
-export function MediaPlayer({ src, ref, onReady, onError }: PlayerProps & { src: string }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
+/**
+ * `audio`: a slim audio bar instead of a video box (script lessons have no picture).
+ * `errorText`: what to say when the file won't play.
+ */
+export function MediaPlayer({
+  src,
+  audio,
+  errorText,
+  ref,
+  onReady,
+  onError,
+}: PlayerProps & { src: string; audio?: boolean; errorText?: string }) {
+  const mediaRef = useRef<HTMLMediaElement | null>(null);
+  // A callback ref, so one ref serves both <audio> and <video>.
+  const attach = (el: HTMLMediaElement | null) => {
+    mediaRef.current = el;
+  };
 
   useImperativeHandle(
     ref,
     () => ({
       play: () => {
-        videoRef.current?.play().catch(() => {});
+        mediaRef.current?.play().catch(() => {});
       },
-      pause: () => videoRef.current?.pause(),
+      pause: () => mediaRef.current?.pause(),
       seek: (s) => {
-        if (videoRef.current) videoRef.current.currentTime = Math.max(0, s);
+        if (mediaRef.current) mediaRef.current.currentTime = Math.max(0, s);
       },
-      getTime: () => videoRef.current?.currentTime ?? 0,
+      getTime: () => mediaRef.current?.currentTime ?? 0,
       setRate: (r) => {
-        if (videoRef.current) videoRef.current.playbackRate = r;
+        if (mediaRef.current) mediaRef.current.playbackRate = r;
       },
       isPlaying: () => {
-        const v = videoRef.current;
+        const v = mediaRef.current;
         return Boolean(v && !v.paused && !v.ended);
       },
     }),
     [],
   );
 
+  if (audio) {
+    return (
+      <audio
+        ref={attach}
+        src={src}
+        controls
+        preload="auto"
+        className="block h-11 w-full"
+        onLoadedMetadata={() => onReady?.()}
+        onError={() => onError?.(errorText ?? "음성 파일을 재생하지 못했어요. 페이지를 새로고침해 주세요.")}
+      />
+    );
+  }
   return (
     <video
-      ref={videoRef}
+      ref={attach}
       src={src}
       controls
       playsInline
       preload="auto"
       className="absolute inset-0 h-full w-full bg-black"
       onLoadedMetadata={() => onReady?.()}
-      onError={() => onError?.("영상 파일을 재생하지 못했어요. 링크가 공개된 파일인지 확인해 주세요.")}
+      onError={() => onError?.(errorText ?? "영상 파일을 재생하지 못했어요. 링크가 공개된 파일인지 확인해 주세요.")}
     />
   );
 }

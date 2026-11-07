@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import CreateLessonForm from "@/components/CreateLessonForm";
-import { ArrowRightIcon } from "@/components/icons";
+import { ArrowRightIcon, CameraIcon } from "@/components/icons";
 import MyRecents from "@/components/MyRecents";
 import RecentLessons, { LessonGridSkeleton } from "@/components/RecentLessons";
+import { canTranscribe } from "@/lib/transcribe";
+import { uploadMode } from "@/lib/uploads";
 
 export default function Home() {
   return (
@@ -21,15 +23,30 @@ export default function Home() {
           </h1>
           {/* 의미 단위로 줄을 나눔: PC·태블릿은 2줄, 좁은 모바일은 둘째 줄이 쉼표 뒤에서 한 번 더 나뉘어 3줄 */}
           <p className="mt-5 break-keep text-base leading-relaxed text-muted sm:text-lg">
-            <span className="block">유튜브 링크만 붙여 넣으면 끝.</span>
+            <span className="block">유튜브 링크나 영상 파일만 있으면 끝.</span>
             <span className="block">
               <span className="inline-block">한 문장씩 듣고, 따라 말하고,</span>{" "}
               <span className="inline-block">바로 발음 점수를 받아요.</span>
             </span>
           </p>
           <div className="mt-8 w-full text-left">
-            <CreateLessonForm />
+            <CreateLessonForm upload={uploadMode()} transcribe={canTranscribe()} />
           </div>
+          <Link
+            href="/script"
+            className="group mt-6 flex w-full items-center gap-3 rounded-2xl border border-line bg-surface p-4 text-left transition hover:border-accent"
+          >
+            <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-accent-soft text-accent">
+              <CameraIcon size={20} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block font-bold group-hover:text-accent">교재 사진으로 강의 스크립트 만들기</span>
+              <span className="mt-0.5 block break-keep text-sm text-muted">
+                학생에게 설명할 영어 스크립트를 쓰고, 음성과 한글 해석으로 연습해요.
+              </span>
+            </span>
+            <ArrowRightIcon size={18} className="shrink-0 text-muted group-hover:text-accent" />
+          </Link>
         </div>
       </section>
 

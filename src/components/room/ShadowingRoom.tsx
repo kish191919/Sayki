@@ -8,6 +8,7 @@ import {
   ChevronDownIcon,
   CloseIcon,
   CompareIcon,
+  DownloadIcon,
   EyeIcon,
   EyeOffIcon,
   HeadphonesIcon,
@@ -73,6 +74,8 @@ type Engine = {
   once: boolean;
   afterEnd: (() => void) | null;
   waitTimer: ReturnType<typeof setTimeout> | undefined;
+  /** What runs when the countdown in progress ends (or is skipped). */
+  waitThen: (() => void) | null;
   /** When we last paused programmatically (the player reports state late). */
   pausedAt: number;
   /** The repeat run in progress, if any. */
@@ -138,8 +141,13 @@ const SAY_IT = "지금 따라 말해 보세요";
 const SAY_IN_ENGLISH = "영어로 말해 보세요";
 const RECALL_MEANING = "뜻을 떠올려 보세요";
 
+const SAY_TIMES: { value: "on" | "off"; label: string }[] = [
+  { value: "on", label: "주기" },
+  { value: "off", label: "건너뛰기" },
+];
+
 /** "한국어를 읽어 주고 2초 뒤에 원어민 영어를 들려줘요. 3번 들려준 뒤 다음 문장으로 넘어가요." */
-function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap) {
+function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap, sayTime: boolean) {
   const pause = gap === 0 ? "바로" : gap === "fit" ? "문장 길이만큼 기다렸다가" : `${gap}초 뒤에`;
   const what = {
     en: "원어민 영어를 들려줘요.",
@@ -151,7 +159,7 @@ function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap) 
     count === 0
       ? "반복을 끌 때까지 계속 되풀이해요."
       : `${count === 1 ? "한 번" : `${count}번`} 들려준 뒤 다음 문장으로 넘어가요.`;
-  return `${what} ${times}`;
+  return `${what} ${times}${sayTime ? "" : " 따라 말할 시간 없이 바로 이어져요."}`;
 }
 
 const RECOGNITION_ERRORS: Record<string, string> = {
@@ -226,6 +234,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     once: false,
     afterEnd: null,
     waitTimer: undefined,
+    waitThen: null,
     pausedAt: 0,
     repeat: null,
   });
@@ -428,18 +437,23 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const clearWait = () => {
     clearTimeout(engine.current.waitTimer);
     engine.current.waitTimer = undefined;
+    engine.current.waitThen = null;
     setWait(null);
+  };
+
+  /** Ends the countdown in progress now and carries on as if it had run out ("건너뛰기"). */
+  const skipWait = () => {
+    const then = engine.current.waitThen;
+    clearWait();
+    then?.();
   };
 
   /** Shows a countdown (time to speak), then runs `then`. */
   const holdThen = (ms: number, label: string, then: () => void) => {
     clearWait();
     setWait({ key: Date.now(), ms, label });
-    engine.current.waitTimer = setTimeout(() => {
-      engine.current.waitTimer = undefined;
-      setWait(null);
-      then();
-    }, ms);
+    engine.current.waitThen = then;
+    engine.current.waitTimer = setTimeout(skipWait, ms);
   };
 
   /** Ends the repeat run in progress (repeating itself stays switched on). */
@@ -596,7 +610,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       setRepeatRound(next.round);
       resumeRepeat();
     };
-    const ms = sayTimeMs(i);
+    const ms = settings.repeatSayTime ? sayTimeMs(i) : 0;
     if (ms > 0) holdThen(ms, parts[parts.length - 1] === "ko" ? SAY_IN_ENGLISH : SAY_IT, go);
     else go();
   };
@@ -698,9 +712,10 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     advanceLatest.current = (i) => {
       const next = nextOf(i);
       if (next === null) return endRepeat();
-      // Repeats the next sentence the same way. In Korean → English mode, a repetition that
-      // starts with the English (the answer) waits for the learner instead: see `goTo`.
-      goTo(next);
+      // Repeats the next sentence the same way — in Korean → English mode too, even when a
+      // repetition starts with the English: the learner chose to hear it. (Moving by hand
+      // there still waits instead of playing the answer: see `goTo`.)
+      startRepeat(next);
     };
     afterWaitLatest.current = (i) => {
       if (settings.loop) play(i);
@@ -1019,6 +1034,10 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       case "L":
         toggleLoop();
         break;
+      case "s":
+      case "S":
+        if (wait) skipWait();
+        break;
       case "h":
       case "H":
         if (speak) toggleHint();
@@ -1079,7 +1098,12 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   /** Why the repeat settings can't read Korean aloud here, if they can't. */
   const repeatKoBlocked = noVoice ? "이 브라우저는 음성 읽기를 지원하지 않아요" : speakUnavailable ? NO_KOREAN : undefined;
   const repeatOrder = repeatKoBlocked ? "en" : settings.repeatOrder;
-  const repeatSummary = describeRepeat(repeatOrder, settings.repeatCount, settings.repeatGap);
+  const repeatSummary = describeRepeat(
+    repeatOrder,
+    settings.repeatCount,
+    settings.repeatGap,
+    settings.repeatSayTime,
+  );
   const repeatTag =
     settings.repeatCount === 0
       ? "∞"
@@ -1127,7 +1151,42 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
       }`}
     >
       <section className="min-w-0 space-y-4">
-        {/* Video — height-capped on desktop so the practice controls stay on screen. */}
+        {lesson.source.kind === "script" || (lesson.source.kind === "file" && lesson.source.type.startsWith("audio/")) ? (
+          /* No picture (script lessons, uploaded audio): a slim audio bar. Scripts offer their MP3 to take along. */
+          <div className="rounded-2xl border border-line bg-surface p-3 shadow-sm">
+            <MediaPlayer
+              ref={playerRef}
+              audio
+              src={`/api/lessons/${lesson.id}/${lesson.source.kind === "script" ? "audio" : "media"}`}
+              errorText={lesson.source.kind === "file" ? "오디오 파일을 재생하지 못했어요. 페이지를 새로고침해 주세요." : undefined}
+              onReady={() => setReady(true)}
+              onError={setPlayerError}
+            />
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-1 text-xs text-muted">
+              <span className="flex items-center gap-1.5">
+                <HeadphonesIcon size={14} />
+                {lesson.source.kind === "script" ? "AI 영어 음성" : "내 오디오 파일"}
+                {lesson.durationSec ? ` · ${formatTime(lesson.durationSec)}` : ""}
+              </span>
+              {lesson.source.kind === "script" && (
+                <a
+                  href={`/api/lessons/${lesson.id}/audio?download`}
+                  download
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full border border-line px-3 font-semibold text-ink transition hover:bg-surface-2"
+                >
+                  <DownloadIcon size={14} />
+                  음성 파일 받기 (MP3)
+                </a>
+              )}
+            </div>
+            {playerError && (
+              <p role="alert" className="mt-2 px-1 text-sm font-semibold text-bad">
+                {playerError}
+              </p>
+            )}
+          </div>
+        ) : (
+        /* Video — height-capped on desktop so the practice controls stay on screen. */
         <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-sm lg:max-h-[max(18rem,calc(100dvh_-_34rem))]">
           {lesson.source.kind === "youtube" ? (
             <YouTubePlayer
@@ -1139,7 +1198,8 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
           ) : (
             <MediaPlayer
               ref={playerRef}
-              src={lesson.source.url}
+              src={lesson.source.kind === "file" ? `/api/lessons/${lesson.id}/media` : lesson.source.url}
+              errorText={lesson.source.kind === "file" ? "영상을 재생하지 못했어요. 페이지를 새로고침해 주세요." : undefined}
               onReady={() => setReady(true)}
               onError={setPlayerError}
             />
@@ -1160,6 +1220,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
             </div>
           )}
         </div>
+        )}
 
         {/* Current sentence */}
         <div className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">
@@ -1387,7 +1448,17 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
 
           {wait && (
             <div className="mt-4">
-              <div className="mb-1 text-xs font-semibold text-accent">{wait.label}</div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-accent">{wait.label}</span>
+                <button
+                  type="button"
+                  onClick={skipWait}
+                  title="건너뛰기 (S)"
+                  className="-my-1 inline-flex h-6 items-center gap-1 rounded-full px-2 text-xs font-semibold text-muted transition hover:bg-surface-2 hover:text-ink"
+                >
+                  건너뛰기 <NextIcon size={12} />
+                </button>
+              </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
                 <div
                   key={wait.key}
@@ -1490,6 +1561,7 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
               order={repeatOrder}
               count={settings.repeatCount}
               gap={settings.repeatGap}
+              sayTime={settings.repeatSayTime}
               koBlocked={repeatKoBlocked}
               summary={repeatSummary}
               onChange={update}
@@ -1648,13 +1720,15 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
                   <>
                     단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>K</Kbd> 한국어 듣기
                     {!noVoice && <> · <Kbd>M</Kbd> 한국어 음소거</>} · <Kbd>H</Kbd> 힌트 ·{" "}
-                    <Kbd>Space</Kbd> 원어민 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복
+                    <Kbd>Space</Kbd> 원어민 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복 ·{" "}
+                    <Kbd>S</Kbd> 기다리기 건너뛰기
                     {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
                     {canHide && <> · <Kbd>Del</Kbd> 문장 삭제</>}
-                  </>
+</>
                 ) : (
                   <>
-                    단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
+                    단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복 ·{" "}
+                    <Kbd>S</Kbd> 기다리기 건너뛰기
                     {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
                     {canHide && <> · <Kbd>Del</Kbd> 문장 삭제</>}
                   </>
@@ -2009,6 +2083,7 @@ function RepeatPanel({
   order,
   count,
   gap,
+  sayTime,
   koBlocked,
   summary,
   onChange,
@@ -2019,6 +2094,7 @@ function RepeatPanel({
   order: RepeatOrder;
   count: RepeatCount;
   gap: RepeatGap;
+  sayTime: boolean;
   /** Why Korean can't be read aloud here, if it can't. */
   koBlocked?: string;
   summary: string;
@@ -2070,6 +2146,14 @@ function RepeatPanel({
             />
           </RepeatRow>
         )}
+        <RepeatRow label="말할 시간">
+          <Segmented
+            label="말할 시간"
+            options={SAY_TIMES}
+            value={sayTime ? "on" : "off"}
+            onChange={(v) => onChange({ repeatSayTime: v === "on" })}
+          />
+        </RepeatRow>
       </div>
       <p className="mt-3 break-keep text-xs text-muted">
         {koBlocked && <>{koBlocked}. 영어만 반복해요. </>}

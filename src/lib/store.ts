@@ -34,13 +34,17 @@ interface LessonStore {
   bump(key: string, ttlSeconds: number): Promise<number>;
 }
 
-const ID_RE = /^(yt|md|up)_[A-Za-z0-9_-]{6,40}$/;
+const ID_RE = /^(yt|md|up|sc|fl)_[A-Za-z0-9_-]{6,40}$/;
 
 export const isLessonId = (id: string) => ID_RE.test(id);
 export const youtubeLessonId = (videoId: string) => `yt_${videoId}`;
 export const mediaLessonId = (url: string) =>
   `md_${createHash("sha256").update(url).digest("base64url").slice(0, 16)}`;
 export const uploadLessonId = () => `up_${randomBytes(9).toString("base64url")}`;
+export const scriptLessonId = () => `sc_${randomBytes(9).toString("base64url")}`;
+export const isScriptLessonId = (id: string) => id.startsWith("sc_");
+export const fileLessonId = () => `fl_${randomBytes(9).toString("base64url")}`;
+export const isFileLessonId = (id: string) => id.startsWith("fl_");
 
 export function summarize(lesson: Lesson): LessonSummary {
   const { sentences, ...rest } = lesson;

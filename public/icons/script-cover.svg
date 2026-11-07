@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180" fill="none">
+  <style>
+    .bg { fill: #ffece6; }
+    .board { fill: #ffffff; stroke: #f4c8bb; }
+    .line { stroke: #ff5b3a; }
+    .soft { stroke: #f4c8bb; }
+    .wave { stroke: #ff5b3a; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #2a1d1a; }
+      .board { fill: #1b1c20; stroke: #4a332d; }
+      .soft { stroke: #4a332d; }
+    }
+  </style>
+  <rect class="bg" width="320" height="180" />
+  <rect class="board" x="70" y="38" width="180" height="104" rx="12" stroke-width="2" />
+  <path class="line" d="M92 66h76" stroke-width="7" stroke-linecap="round" />
+  <path class="soft" d="M92 88h136M92 106h112" stroke-width="7" stroke-linecap="round" />
+  <path class="wave" d="M196 66h6M210 58v16M218 52v28M226 60v12" stroke-width="5" stroke-linecap="round" />
+</svg>

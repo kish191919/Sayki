@@ -28,6 +28,8 @@ export type Settings = {
   repeatCount: RepeatCount;
   repeatOrder: RepeatOrder;
   repeatGap: RepeatGap;
+  /** After each repetition, wait for the learner to say the sentence ("지금 따라 말해 보세요"). */
+  repeatSayTime: boolean;
   showText: boolean;
   showKorean: boolean;
   /** Listen mode doesn't read each sentence's Korean aloud: it shows it as text instead. */
@@ -48,6 +50,7 @@ export const DEFAULT_SETTINGS: Settings = {
   repeatCount: 0,
   repeatOrder: "en",
   repeatGap: 2,
+  repeatSayTime: true,
   showText: true,
   showKorean: true,
   koMuted: false,

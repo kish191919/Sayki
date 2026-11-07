@@ -26,13 +26,25 @@ export type Sentence = {
 
 export type LessonSource =
   | { kind: "youtube"; videoId: string }
-  | { kind: "media"; url: string };
+  | { kind: "media"; url: string }
+  /**
+   * A teaching script Claude wrote from the learner's material, read aloud by OpenAI TTS.
+   * `audio` is where its MP3 lives: a private Vercel Blob URL, or "local" (`.data/audio/`).
+   */
+  | { kind: "script"; audio: string }
+  /**
+   * A video/audio file the learner uploaded (e.g. an Instagram reel saved to the phone).
+   * `media` / `thumb` are private Vercel Blob URLs, or "local" (`.data/media/`); `thumb` null: none.
+   * `type` is the file's media type ("audio/…" plays in an audio bar).
+   */
+  | { kind: "file"; media: string; type: string; thumb: string | null };
 
 export type CaptionOrigin =
   | "youtube-manual"
   | "youtube-auto"
   | "upload"
-  | "whisper";
+  | "whisper"
+  | "script";
 
 /** "ai": translated sentence-by-sentence by Claude (1:1 with the English). */
 export type KoreanOrigin = "youtube-manual" | "youtube-auto-translate" | "ai" | null;
@@ -51,6 +63,20 @@ export type Lesson = {
   aiPending?: number[];
   /** AI translation only: how many translation passes have run. */
   aiAttempts?: number;
+};
+
+/** One line of a teaching script: what to say, and its Korean for the "Korean → English" modes. */
+export type ScriptLine = { en: string; ko: string };
+
+/** A teaching script as Claude wrote it, before the learner reviews it and its audio is made. */
+export type ScriptDraft = {
+  /** English title, e.g. "Comparing Fractions". */
+  title: string;
+  /** Korean title, e.g. "분수의 크기 비교". */
+  titleKo: string;
+  lines: ScriptLine[];
+  /** What to check before practising (in Korean): unreadable parts of a photo, guesses, likely errors. */
+  notes: string[];
 };
 
 export type LessonSummary = Omit<Lesson, "sentences"> & {

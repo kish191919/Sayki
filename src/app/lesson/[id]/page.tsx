@@ -13,6 +13,7 @@ const CAPTION_LABEL: Record<Lesson["captionOrigin"], string> = {
   "youtube-auto": "영어 자동 자막",
   upload: "업로드한 자막",
   whisper: "AI 생성 자막",
+  script: "AI 강의 스크립트",
 };
 
 const KOREAN_LABEL = {

@@ -123,6 +123,12 @@ export const FileIcon = (p: IconProps) => (
     <path d="M14 3v6h6M8 13h8M8 17h5" />
   </Svg>
 );
+export const VideoIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="2.5" y="6" width="13.5" height="12" rx="2.5" />
+    <path d="m16 10.5 5.5-3.5v10l-5.5-3.5z" />
+  </Svg>
+);
 export const FolderIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -172,6 +178,30 @@ export const PencilIcon = (p: IconProps) => (
   <Svg {...p}>
     <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z" />
     <path d="m13.5 6.5 4 4" />
+  </Svg>
+);
+export const DownloadIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+  </Svg>
+);
+export const CameraIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 8h3l2-3h6l2 3h3v11H4z" />
+    <circle cx="12" cy="13" r="3.5" />
+  </Svg>
+);
+export const ImageIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+    <circle cx="9" cy="10" r="1.6" />
+    <path d="m20.5 16-5-5-9 8.5" />
+  </Svg>
+);
+export const SparkIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 3.5 13.8 9 19.5 10.8 13.8 12.6 12 18.5 10.2 12.6 4.5 10.8 10.2 9z" />
+    <path d="M18.5 3.5v3M17 5h3" />
   </Svg>
 );
 export const ArrowRightIcon = (p: IconProps) => (

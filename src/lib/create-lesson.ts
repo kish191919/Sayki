@@ -19,7 +19,7 @@ import {
 
 const MEDIA_EXT_RE = /\.(mp4|m4v|webm|mov|ogv|mp3|m4a|aac|wav|ogg|oga|flac)$/i;
 
-function sentencesFrom(cues: Cue[]): Sentence[] {
+export function sentencesFrom(cues: Cue[]): Sentence[] {
   const sentences = buildSentences(cues);
   if (sentences.length === 0) {
     throw new LessonError("NO_SENTENCES", "자막에서 연습할 문장을 찾지 못했어요.", 422);
@@ -27,7 +27,7 @@ function sentencesFrom(cues: Cue[]): Sentence[] {
   return sentences;
 }
 
-function subtitleCues(text: string): Cue[] {
+export function subtitleCues(text: string): Cue[] {
   const cues = parseSubtitleFile(text);
   if (cues.length === 0) {
     throw new LessonError("BAD_SUBTITLE", "자막 파일을 읽지 못했어요. .srt 또는 .vtt 형식인지 확인해 주세요.", 422);
@@ -147,10 +147,38 @@ async function fromMediaUrl(url: URL, subtitleText: string | null): Promise<Less
   return lesson;
 }
 
+/** Sites whose videos can't be fetched by link (no captions, playback API, or stable file URL). */
+const UPLOAD_ONLY_SITES: [RegExp, string][] = [
+  [/(^|\.)(instagram\.com|instagr\.am)$/, "인스타그램"],
+  [/(^|\.)tiktok\.com$/, "틱톡"],
+  [/(^|\.)(facebook\.com|fb\.watch)$/, "페이스북"],
+  [/(^|\.)threads\.(net|com)$/, "스레드"],
+  [/(^|\.)(x\.com|twitter\.com)$/, "X(트위터)"],
+];
+
+function uploadOnlySite(rawUrl: string): string | null {
+  let host: string;
+  try {
+    host = new URL(/^[a-z]+:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  return UPLOAD_ONLY_SITES.find(([re]) => re.test(host))?.[1] ?? null;
+}
+
 /** Turns a pasted link (plus an optional subtitle file) into a saved lesson. */
 export async function createLesson(rawUrl: string, subtitleText: string | null): Promise<Lesson> {
   const videoId = parseYouTubeId(rawUrl);
   if (videoId) return fromYouTube(videoId, subtitleText);
+
+  const site = uploadOnlySite(rawUrl);
+  if (site) {
+    throw new LessonError(
+      "NEEDS_UPLOAD",
+      `${site} 영상은 링크로 가져올 수 없어요. 영상을 기기에 저장한 뒤 ‘영상 파일 올리기’로 올려 주세요.`,
+      422,
+    );
+  }
 
   let url: URL | null = null;
   try {

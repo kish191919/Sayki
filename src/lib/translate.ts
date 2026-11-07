@@ -1,5 +1,6 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropic, canUseClaude, fallbackParams, tokenTotals } from "./claude";
 import { LessonError } from "./errors";
 import { bumpCounter, getLesson, saveLesson } from "./store";
 import { pendingAiLines } from "./translation-state";
@@ -12,8 +13,6 @@ import type { Lesson } from "./types";
  */
 
 const MODEL = process.env.ANTHROPIC_TRANSLATE_MODEL || "claude-opus-5-5";
-/** Models that accept server-side `fallbacks: "default"` (not Haiku). */
-const FALLBACK_MODELS = new Set(["claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"]);
 
 const CHUNK_SIZE = 40;
 /** Chunk size for the second pass over lines that came back missing. */
@@ -23,12 +22,7 @@ const CONTEXT_LINES = 3;
 const MAX_SENTENCES = 1500;
 const DAILY_LIMIT = Number(process.env.TRANSLATE_DAILY_LIMIT) || 100;
 
-export function canTranslate(): boolean {
-  return Boolean(process.env.ANTHROPIC_API_KEY);
-}
-
-let client: Anthropic | null = null;
-const anthropic = () => (client ??= new Anthropic());
+export const canTranslate = canUseClaude;
 
 const SYSTEM = `You translate English video subtitles into Korean for Korean learners of English.
 
@@ -87,17 +81,12 @@ async function translateChunk(title: string, items: Item[], context: string[], r
       format: { type: "json_schema", schema: SCHEMA },
     },
     messages: [{ role: "user", content: prompt }],
-    ...(FALLBACK_MODELS.has(MODEL)
-      ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const }
-      : {}),
+    ...fallbackParams(MODEL),
   });
 
-  // With fallbacks, top-level usage covers only the attempt that answered.
-  const attempts = response.usage.iterations?.length ? response.usage.iterations : [response.usage];
-  for (const a of attempts) {
-    run.input += a.input_tokens;
-    run.output += a.output_tokens;
-  }
+  const tokens = tokenTotals(response.usage);
+  run.input += tokens.input;
+  run.output += tokens.output;
   const span = `lines ${items[0].id}–${items[items.length - 1].id}`;
 
   if (response.stop_reason === "refusal") {

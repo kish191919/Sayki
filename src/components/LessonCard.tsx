@@ -8,9 +8,11 @@ const CAPTION_BADGE = {
   "youtube-auto": "자동 자막",
   upload: "업로드 자막",
   whisper: "AI 자막",
+  script: "강의 스크립트",
 } as const;
 
 export function lessonBadge(l: Pick<LessonSummary, "captionOrigin" | "koreanOrigin">): string | null {
+  if (l.captionOrigin === "script") return CAPTION_BADGE.script;
   return l.koreanOrigin ? "한글 해석" : CAPTION_BADGE[l.captionOrigin];
 }
 
