@@ -89,6 +89,9 @@ export type LibraryLesson = Pick<
   "id" | "title" | "thumbnail" | "sentenceCount" | "createdAt" | "captionOrigin" | "koreanOrigin"
 >;
 
+/** What the "내 스크립트" list on the script page needs per script lesson. */
+export type ScriptListItem = Pick<LessonSummary, "id" | "title" | "sentenceCount" | "durationSec" | "createdAt">;
+
 export const FOLDER_NAME_MAX = 30;
 
 export type Folder = { id: string; name: string };

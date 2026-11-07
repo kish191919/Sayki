@@ -547,7 +547,11 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     playSegment(i, { once: true, afterEnd });
   };
 
-  const pause = () => {
+  /**
+   * Stops what's playing or counting down, but not the silence that keeps a phone awake (see
+   * `useKeepAlive`): for starting another sound right after.
+   */
+  const halt = () => {
     clearWait();
     const e = engine.current;
     if (e.repeat) {
@@ -558,6 +562,11 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
     e.afterEnd = null;
     e.pausedAt = performance.now();
     playerRef.current?.pause();
+  };
+
+  /** Stops playback — and the silence, so the phone may sleep again. */
+  const pause = () => {
+    halt();
     keepAlive(false);
   };
 
@@ -587,7 +596,11 @@ export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt
   const startRepeat = (i: number) => {
     if (!ready || recorder.status !== "idle") return;
     const idx = clamp(i);
-    pause();
+    // Not `pause()`: when a run moves on to the next sentence by itself, that would stop the
+    // silence just before the sentence starts — and a phone doesn't start a sound after a
+    // silent moment like that, so the run stopped there. The silence stops by itself once the
+    // sentence plays (see `onTick`), as it does between two repetitions of one sentence.
+    halt();
     stopMine();
     stopKorean();
     engine.current.repeat = { index: idx, round: 1, step: 0, rested: false };

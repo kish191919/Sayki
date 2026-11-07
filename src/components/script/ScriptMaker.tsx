@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ArrowRightIcon, CameraIcon, CloseIcon, ImageIcon, PlusIcon, SparkIcon, TrashIcon } from "@/components/icons";
 import ConfirmDialog from "@/components/library/ConfirmDialog";
+import MoreInfo from "@/components/script/MoreInfo";
 import type { ScriptDraft } from "@/lib/types";
 
 /**
@@ -467,7 +468,9 @@ export default function ScriptMaker() {
             {photos.length}/{MAX_PHOTOS}장
           </span>
         </div>
-        <p className="mt-1 break-keep text-sm text-muted">설명할 페이지를 찍거나 골라 주세요. 여러 장이면 순서대로 올려 주세요.</p>
+        <MoreInfo label="사진 올리는 방법" className="mt-1">
+          <p className="break-keep text-sm text-muted">설명할 페이지를 찍거나 골라 주세요. 여러 장이면 순서대로 올려 주세요.</p>
+        </MoreInfo>
 
         {photos.length > 0 && (
           <ul className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
