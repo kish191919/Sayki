@@ -5,8 +5,11 @@
 
 export type WaitMode = "manual" | "auto1" | "auto15" | "continuous";
 
-/** shadow: listen, then repeat. speak: read the Korean, say the English. */
-export type PracticeMode = "shadow" | "speak";
+/**
+ * shadow: listen, then repeat. speak: read the Korean, say the English.
+ * listen: hear the Korean read aloud, say the English (scores shared with speak).
+ */
+export type PracticeMode = "shadow" | "speak" | "listen";
 
 export type Settings = {
   mode: PracticeMode;
@@ -38,7 +41,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export type LessonProgress = {
   /** Best shadowing score per sentence. */
   best: Record<number, number>;
-  /** Best match rate per sentence in Korean → English mode. */
+  /** Best match rate per sentence in the Korean → English modes (read or heard). */
   bestSpeak: Record<number, number>;
   last: number;
 };

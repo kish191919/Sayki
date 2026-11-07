@@ -14,6 +14,7 @@ import {
   PlayIcon,
   PrevIcon,
   ReplayIcon,
+  SpeakerIcon,
   StopIcon,
 } from "@/components/icons";
 import {
@@ -30,6 +31,7 @@ import { scoreAttempt, scoreTone, type Attempt } from "@/lib/score";
 import { pendingAiLines } from "@/lib/translation-state";
 import type { Lesson } from "@/lib/types";
 import { MediaPlayer, YouTubePlayer, type PlayerHandle } from "./players";
+import { useKoreanSpeech } from "./useKoreanSpeech";
 import { speechRecognitionSupported, useRecorder } from "./useRecorder";
 
 type Try = {
@@ -61,7 +63,10 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5];
 const MODES: { value: PracticeMode; label: string }[] = [
   { value: "shadow", label: "듣고 따라 말하기" },
   { value: "speak", label: "한국어 보고 영어로 말하기" },
+  { value: "listen", label: "한국어 듣고 영어로 말하기" },
 ];
+
+const NO_KOREAN = "한글 해석이 없는 영상이에요";
 
 const WAIT_MODES: { value: WaitMode; label: string; hint: string }[] = [
   { value: "manual", label: "문장마다 멈춤", hint: "한 문장을 듣고 멈춰요. 따라 말한 뒤 직접 넘어가요." },
@@ -154,8 +159,15 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const [translate, setTranslate] = useState<TranslateState>({ status: needsTranslation ? "working" : "idle" });
   const [recognitionSupported] = useState(speechRecognitionSupported);
   const recorder = useRecorder(meterRef);
+  const koSpeech = useKoreanSpeech();
+  /** Listen mode: the sentence whose hidden Korean was opened as text. */
+  const [koRevealed, setKoRevealed] = useState<number | null>(null);
+  /** Listen mode: a sentence to read aloud once its Korean (or the voice) is ready. */
+  const pendingRead = useRef<number | null>(settings.mode === "listen" ? current : null);
 
-  const speak = settings.mode === "speak";
+  /** Either Korean → English mode: the Korean is read ("speak") or heard ("listen"). */
+  const speak = settings.mode !== "shadow";
+  const listening = settings.mode === "listen";
   /** Korean → English mode always goes sentence by sentence, whatever the wait mode says. */
   const continuousPlay = !speak && settings.waitMode === "continuous";
   const update = (patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch }));
@@ -202,12 +214,18 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     audio.play().catch(() => {});
   };
 
+  const stopKorean = () => {
+    pendingRead.current = null;
+    koSpeech.stop();
+  };
+
   const play = (i: number, opts: { once?: boolean; afterEnd?: () => void } = {}) => {
     const p = playerRef.current;
     if (!p || !ready || recorder.status !== "idle") return;
     const idx = clamp(i);
     clearWait();
     stopMine();
+    stopKorean();
     const e = engine.current;
     e.once = Boolean(opts.once);
     e.mode = !e.once && continuousPlay ? "continuous" : "segment";
@@ -229,13 +247,35 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     playerRef.current?.pause();
   };
 
-  /** Moves to a sentence. In Korean → English mode it must not play (that would reveal the answer). */
+  /** Reads a sentence's Korean aloud — or, while it isn't ready yet, as soon as it is. */
+  const readKorean = (i: number) => {
+    const text = koOf(i);
+    if (!text || !koSpeech.voice) {
+      pendingRead.current = i;
+      return;
+    }
+    if (recorder.status !== "idle") return;
+    pendingRead.current = null;
+    pause();
+    stopMine();
+    koSpeech.speak(text);
+  };
+
+  const toggleKorean = () => (koSpeech.speaking ? stopKorean() : readKorean(current));
+
+  /**
+   * Moves to a sentence. In Korean → English modes it must not play (that would reveal
+   * the answer); listen mode reads the new sentence's Korean instead.
+   */
   const goTo = (i: number) => {
     if (!speak) return play(i);
     if (recorder.status !== "idle") return;
     pause();
     stopMine();
-    setCurrent(clamp(i));
+    const idx = clamp(i);
+    setCurrent(idx);
+    if (listening) readKorean(idx);
+    else stopKorean();
   };
 
   const setAnswer = (i: number, show: boolean) =>
@@ -259,7 +299,9 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     if (mode === settings.mode || recorder.status !== "idle") return;
     pause();
     stopMine();
+    stopKorean();
     update({ mode });
+    if (mode === "listen") readKorean(current);
   };
 
   /** "이 문장 반복": switching it on starts the current sentence right away. */
@@ -320,6 +362,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       let j = indexAt(t);
       if (t >= endOf(j) - 0.1 && j < total - 1) j += 1;
       clearWait();
+      stopKorean();
       e.once = false;
       e.mode = continuousPlay ? "continuous" : "segment";
       e.index = j;
@@ -389,6 +432,15 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     };
   }, [needsTranslation, lesson.id]);
 
+  // Listen mode waits for the Korean (AI translation, voice list) before reading it out.
+  const koReady = Boolean(koOf(current) && koSpeech.voice);
+  const onKoreanReady = useEffectEvent(() => {
+    if (listening && pendingRead.current === current) readKorean(current);
+  });
+  useEffect(() => {
+    if (koReady) onKoreanReady();
+  }, [koReady, current]);
+
   const retryTranslation = () => {
     setTranslate({ status: "working" });
     requestTranslation(lesson.id).then(
@@ -410,12 +462,14 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     if (recorder.status !== "idle") return;
     pause();
     stopMine();
+    stopKorean();
     const i = current;
     const mode = settings.mode;
+    const composing = mode !== "shadow";
     const sentence = sentences[i];
     const length = sentence.end - sentence.start;
     const result = await recorder.start(
-      mode === "speak"
+      composing
         ? // Composing a sentence takes longer than repeating one.
           { maxSeconds: Math.min(40, Math.max(10, length * 3 + 6)), trailingSilenceMs: 2200, noSpeechMs: 12000 }
         : { maxSeconds: Math.min(30, Math.max(5, length * 2.5 + 2)) },
@@ -434,11 +488,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       },
     }));
     // Open the answer to compare against, even when the speech wasn't recognised.
-    if (mode === "speak") setAnswer(i, true);
+    if (composing) setAnswer(i, true);
     if (!attempt) return;
-    const setter = mode === "speak" ? setBestSpeak : setBest;
+    const setter = composing ? setBestSpeak : setBest;
     setter((prev) => ((prev[i] ?? -1) >= attempt.score ? prev : { ...prev, [i]: attempt.score }));
-    if (mode !== "speak") setRevealed(i);
+    if (!composing) setRevealed(i);
   };
 
   const compare = (i: number) => {
@@ -526,6 +580,10 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       case "H":
         if (speak) toggleHint();
         break;
+      case "k":
+      case "K":
+        if (speak) toggleKorean();
+        break;
     }
   });
 
@@ -559,6 +617,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     .join(" · ");
   const answerVisible = answerShown.has(current);
   const speakUnavailable = !hasKorean && translate.status !== "working";
+  /** No Korean voice on this device: listen mode falls back to showing the text. */
+  const noVoice = koSpeech.voice === null;
+  /** Listen mode keeps a sentence's Korean hidden until it's opened or answered. */
+  const koHiddenAt = (i: number) => listening && !noVoice && koRevealed !== i && !answerShown.has(i);
+  const koHidden = koHiddenAt(current);
 
   const englishLine = attempt
     ? attempt.marks.map((m, k) => (
@@ -644,7 +707,14 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                 </span>
               )}
             </div>
-            <ModeSwitch value={settings.mode} onChange={switchMode} speakDisabled={speakUnavailable} />
+            <ModeSwitch
+              value={settings.mode}
+              onChange={switchMode}
+              disabled={{
+                speak: speakUnavailable ? NO_KOREAN : undefined,
+                listen: speakUnavailable ? NO_KOREAN : noVoice ? "이 브라우저에는 한국어 음성이 없어요" : undefined,
+              }}
+            />
           </div>
           {translate.status === "working" && (
             <p className="-mt-2 mb-3 flex items-center gap-2 text-xs font-semibold text-muted">
@@ -662,9 +732,49 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 
           {speak ? (
             <>
-              <p className="text-xs font-semibold text-accent">이 뜻을 영어로 말해 보세요</p>
+              <p className="text-xs font-semibold text-accent">
+                {listening ? "한국어를 듣고 영어로 말해 보세요" : "이 뜻을 영어로 말해 보세요"}
+              </p>
+              {listening && noVoice && (
+                <p className="mt-1 text-xs text-muted">이 브라우저에는 한국어 음성이 없어 글로 보여 드려요.</p>
+              )}
               {ko ? (
-                <p className="mt-1 break-keep text-[1.35rem] font-semibold leading-relaxed sm:text-2xl">{ko}</p>
+                <div className="mt-1 flex items-start gap-3">
+                  {!noVoice && (
+                    <button
+                      type="button"
+                      onClick={toggleKorean}
+                      disabled={!koSpeech.voice || busy}
+                      aria-pressed={koSpeech.speaking}
+                      aria-label={koSpeech.speaking ? "읽기 멈추기 (K)" : "한국어로 듣기 (K)"}
+                      title={koSpeech.speaking ? "읽기 멈추기 (K)" : "한국어로 듣기 (K)"}
+                      className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full border transition disabled:opacity-40 ${
+                        koSpeech.speaking ? "border-accent bg-accent-soft text-accent" : "border-line hover:bg-surface-2"
+                      }`}
+                    >
+                      <SpeakerIcon size={18} className={koSpeech.speaking ? "animate-pulse" : undefined} />
+                    </button>
+                  )}
+                  <div className="relative min-w-0 flex-1">
+                    <p
+                      className={`break-keep text-[1.35rem] font-semibold leading-relaxed sm:text-2xl ${
+                        koHidden ? "select-none blur-md" : ""
+                      }`}
+                      aria-hidden={koHidden || undefined}
+                    >
+                      {ko}
+                    </p>
+                    {koHidden && (
+                      <button
+                        type="button"
+                        onClick={() => setKoRevealed(current)}
+                        className="absolute inset-0 m-auto flex h-10 w-fit items-center gap-2 rounded-full bg-ink px-4 text-sm font-semibold text-bg"
+                      >
+                        <EyeIcon size={16} /> 글로 보기
+                      </button>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <p className="mt-1 text-muted">
                   {translate.status === "working" ? "한글 해석을 준비하고 있어요…" : "이 문장은 한글 해석이 없어요."}
@@ -916,8 +1026,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
               <p className="text-xs text-muted sm:col-span-2">
                 {speak ? (
                   <>
-                    단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>H</Kbd> 힌트 · <Kbd>Space</Kbd> 듣기/멈춤 ·<Kbd>←</Kbd>{" "}
-                    <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복
+                    단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>K</Kbd> 한국어 듣기 · <Kbd>H</Kbd> 힌트 ·{" "}
+                    <Kbd>Space</Kbd> 원어민 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복
                   </>
                 ) : (
                   <>
@@ -979,7 +1089,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                       <span className="min-w-0 flex-1">
                         {speak ? (
                           <>
-                            <span className={`block break-keep leading-snug ${active ? "font-semibold" : ""}`}>
+                            <span
+                              className={`block break-keep leading-snug ${active ? "font-semibold" : ""} ${
+                                lineKo && koHiddenAt(i) ? "select-none blur-[3px]" : ""
+                              }`}
+                            >
                               {lineKo || <span className="text-muted">…</span>}
                             </span>
                             {englishOpen && (
@@ -1024,16 +1138,22 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 function ModeSwitch({
   value,
   onChange,
-  speakDisabled,
+  disabled: reasons,
 }: {
   value: PracticeMode;
   onChange: (mode: PracticeMode) => void;
-  speakDisabled: boolean;
+  /** Why a mode can't be picked, by mode. */
+  disabled: Partial<Record<PracticeMode, string>>;
 }) {
   return (
-    <div className="flex w-full rounded-xl bg-surface-2 p-1 sm:inline-flex sm:w-auto" role="tablist" aria-label="연습 방식">
+    <div
+      className="flex w-full max-w-full rounded-xl bg-surface-2 p-1 sm:inline-flex sm:w-auto"
+      role="tablist"
+      aria-label="연습 방식"
+    >
       {MODES.map((m) => {
-        const disabled = m.value === "speak" && speakDisabled;
+        const reason = reasons[m.value];
+        const disabled = Boolean(reason);
         return (
           <button
             key={m.value}
@@ -1042,8 +1162,8 @@ function ModeSwitch({
             aria-selected={value === m.value}
             onClick={() => onChange(m.value)}
             disabled={disabled}
-            title={disabled ? "한글 해석이 없는 영상이에요" : undefined}
-            className={`min-h-9 flex-1 break-keep rounded-lg px-3 py-1.5 text-sm font-semibold leading-tight transition disabled:opacity-40 sm:flex-none sm:px-4 ${
+            title={reason}
+            className={`min-h-9 flex-1 break-keep rounded-lg px-3 py-1.5 text-sm font-semibold leading-tight transition disabled:opacity-40 sm:flex-initial sm:px-4 ${
               value === m.value ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
             }`}
           >
