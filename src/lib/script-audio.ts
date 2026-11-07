@@ -71,10 +71,17 @@ export type ScriptAudio = {
 export async function buildScriptAudio(sentences: string[]): Promise<ScriptAudio> {
   const clips: Int16Array[] = new Array(sentences.length);
   let next = 0;
+  // After one sentence fails the lesson is lost: stop paying for the rest.
+  let failed = false;
   const workers = Array.from({ length: Math.min(CONCURRENCY, sentences.length) }, async () => {
-    while (next < sentences.length) {
+    while (!failed && next < sentences.length) {
       const i = next++;
-      clips[i] = trim(await synthesize(sentences[i]));
+      try {
+        clips[i] = trim(await synthesize(sentences[i]));
+      } catch (e) {
+        failed = true;
+        throw e;
+      }
     }
   });
   await Promise.all(workers);
