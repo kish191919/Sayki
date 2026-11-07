@@ -117,6 +117,71 @@ export const FileIcon = (p: IconProps) => (
     <path d="M14 3v6h6M8 13h8M8 17h5" />
   </Svg>
 );
+export const FolderIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+  </Svg>
+);
+export const SearchIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </Svg>
+);
+export const GridIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="3.5" y="3.5" width="7" height="7" rx="1.5" />
+    <rect x="13.5" y="3.5" width="7" height="7" rx="1.5" />
+    <rect x="3.5" y="13.5" width="7" height="7" rx="1.5" />
+    <rect x="13.5" y="13.5" width="7" height="7" rx="1.5" />
+  </Svg>
+);
+export const ListIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 6h11M9 12h11M9 18h11" />
+    <path d="M4 6h.01M4 12h.01M4 18h.01" strokeWidth={3} />
+  </Svg>
+);
+export const CheckIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m5 12.5 4.5 4.5L19 7.5" />
+  </Svg>
+);
+export const PlusIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Svg>
+);
+export const CloseIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m6 6 12 12M18 6 6 18" />
+  </Svg>
+);
+export const TrashIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 7h16M10 11v6M14 11v6M9 7V4h6v3M6 7l1 13h10l1-13" />
+  </Svg>
+);
+export const PencilIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z" />
+    <path d="m13.5 6.5 4 4" />
+  </Svg>
+);
+export const ArrowRightIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M5 12h14M13 6l6 6-6 6" />
+  </Svg>
+);
+/** A ribbon bookmark; `filled` when the sentence is bookmarked. */
+export const BookmarkIcon = ({ filled, ...p }: IconProps & { filled?: boolean }) => (
+  <Svg {...p}>
+    <path
+      d="M7 3.5h10a1.5 1.5 0 0 1 1.5 1.5v15.5L12 16l-6.5 4.5V5A1.5 1.5 0 0 1 7 3.5z"
+      fill={filled ? "currentColor" : "none"}
+    />
+  </Svg>
+);
 
 /** Sayki mark: a speech bubble holding a sound wave. */
 export function SaykiMark({ size = 28 }: { size?: number }) {

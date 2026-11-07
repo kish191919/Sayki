@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import RoomLoader from "@/components/room/RoomLoader";
 import RoomSkeleton from "@/components/room/RoomSkeleton";
+import { bookmarkLessonOrder, listBookmarks } from "@/lib/bookmarks";
 import { getLesson } from "@/lib/store";
 import { canTranslate } from "@/lib/translate";
 import type { Lesson } from "@/lib/types";
@@ -26,7 +27,7 @@ export async function generateMetadata({ params }: PageProps<"/lesson/[id]">): P
   return { title: lesson ? `${lesson.title} 쉐도잉` : "레슨을 찾을 수 없어요" };
 }
 
-export default function LessonPage({ params }: PageProps<"/lesson/[id]">) {
+export default function LessonPage({ params, searchParams }: PageProps<"/lesson/[id]">) {
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6">
       <Suspense
@@ -37,16 +38,32 @@ export default function LessonPage({ params }: PageProps<"/lesson/[id]">) {
           </>
         }
       >
-        <LessonContent params={params} />
+        <LessonContent params={params} searchParams={searchParams} />
       </Suspense>
     </div>
   );
 }
 
-async function LessonContent({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  const lesson = await getLesson(id);
+type Query = Record<string, string | string[] | undefined>;
+
+async function LessonContent({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<Query> }) {
+  const [{ id }, query] = await Promise.all([params, searchParams]);
+  const [lesson, bookmarks] = await Promise.all([
+    getLesson(id),
+    // Practice works without bookmarks; the room just hides the button.
+    listBookmarks().catch((e) => {
+      console.error("bookmarks load failed", e);
+      return null;
+    }),
+  ]);
   if (!lesson) notFound();
+
+  // ?only=bookmarks — practice only the bookmarked sentences; ?s=12 — open at sentence 13.
+  const only = query.only === "bookmarks";
+  const order = bookmarks ? bookmarkLessonOrder(bookmarks) : [];
+  const at = order.indexOf(lesson.id);
+  const s = Number(query.s);
+  const startAt = typeof query.s === "string" && Number.isInteger(s) && s >= 0 && s < lesson.sentences.length ? s : null;
 
   return (
     <>
@@ -65,7 +82,19 @@ async function LessonContent({ params }: { params: Promise<{ id: string }> }) {
           </p>
         )}
       </div>
-      <RoomLoader lesson={lesson} canTranslate={canTranslate()} />
+      <RoomLoader
+        // The same lesson opened by another link (another sentence, bookmarks only or not)
+        // is kept mounted by the router: start it afresh so those options apply.
+        key={`${only ? "only" : "all"}:${startAt ?? ""}`}
+        lesson={lesson}
+        canTranslate={canTranslate()}
+        startAt={startAt}
+        bookmarks={{
+          indexes: bookmarks ? bookmarks.filter((b) => b.lessonId === lesson.id).map((b) => b.index) : null,
+          only,
+          next: only && at >= 0 ? (order[at + 1] ?? null) : null,
+        }}
+      />
     </>
   );
 }

@@ -1,5 +1,7 @@
+import Link from "next/link";
 import { Suspense } from "react";
 import CreateLessonForm from "@/components/CreateLessonForm";
+import { ArrowRightIcon } from "@/components/icons";
 import MyRecents from "@/components/MyRecents";
 import RecentLessons, { LessonGridSkeleton } from "@/components/RecentLessons";
 
@@ -29,7 +31,15 @@ export default function Home() {
       <MyRecents />
 
       <section className="mx-auto max-w-[1400px] px-4 pb-16 pt-10 sm:px-6">
-        <h2 className="mb-4 text-xl font-bold">최근 만들어진 레슨</h2>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="text-xl font-bold">최근 만들어진 레슨</h2>
+          <Link
+            href="/lessons"
+            className="inline-flex shrink-0 items-center gap-1 text-sm font-semibold text-muted transition hover:text-accent"
+          >
+            전체 보기·정리 <ArrowRightIcon size={16} />
+          </Link>
+        </div>
         <Suspense fallback={<LessonGridSkeleton />}>
           <RecentLessons />
         </Suspense>

@@ -1,14 +1,7 @@
-import LessonCard from "@/components/LessonCard";
+import LessonCard, { lessonBadge } from "@/components/LessonCard";
 import { listRecentLessons } from "@/lib/store";
 
-const BADGE = {
-  "youtube-manual": null,
-  "youtube-auto": "자동 자막",
-  upload: "업로드 자막",
-  whisper: "AI 자막",
-} as const;
-
-/** Lessons anyone created recently (server-rendered from the lesson store). */
+/** The newest lessons (server-rendered from the lesson store). */
 export default async function RecentLessons() {
   let lessons: Awaited<ReturnType<typeof listRecentLessons>>;
   try {
@@ -29,17 +22,17 @@ export default async function RecentLessons() {
           title={l.title}
           thumbnail={l.thumbnail}
           sentenceCount={l.sentenceCount}
-          badge={l.koreanOrigin ? "한글 해석" : BADGE[l.captionOrigin]}
+          badge={lessonBadge(l)}
         />
       ))}
     </div>
   );
 }
 
-export function LessonGridSkeleton() {
+export function LessonGridSkeleton({ count = 4 }: { count?: number }) {
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      {Array.from({ length: 4 }, (_, i) => (
+      {Array.from({ length: count }, (_, i) => (
         <div key={i} className="aspect-[4/3.4] animate-pulse rounded-2xl bg-surface-2" />
       ))}
     </div>

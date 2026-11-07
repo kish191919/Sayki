@@ -98,19 +98,30 @@ export function useRecorder(meterRef: RefObject<HTMLElement | null>) {
   const streamRef = useRef<MediaStream | null>(null);
   const sessionRef = useRef<Session | null>(null);
 
+  /**
+   * Close the microphone between recordings. While it stays open, iOS keeps the page in
+   * call-style audio (quiet earpiece output, speech synthesis silenced), and speaking mutes
+   * the open track for good, so a reused one would record silence.
+   */
+  const releaseMic = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
   const settle = useCallback((s: Session) => {
     if (s.settled || !s.recorderDone || !s.recognitionDone) return;
     s.settled = true;
     clearTimeout(s.graceTimer);
     const blob = s.chunks.length ? new Blob(s.chunks, { type: s.recorder.mimeType || "audio/webm" }) : null;
     sessionRef.current = null;
+    releaseMic();
     setStatus("idle");
     s.resolve({
       url: blob ? URL.createObjectURL(blob) : null,
       transcript: (s.finalText || s.interimText).trim(),
       recognitionError: s.recognitionError,
     });
-  }, []);
+  }, [releaseMic]);
 
   const stop = useCallback(() => {
     const s = sessionRef.current;
@@ -145,14 +156,12 @@ export function useRecorder(meterRef: RefObject<HTMLElement | null>) {
       setLiveText("");
       setStatus("starting");
 
-      let stream = streamRef.current;
+      let stream: MediaStream;
       try {
-        if (!stream || !stream.active) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-          });
-          streamRef.current = stream;
-        }
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        streamRef.current = stream;
       } catch (e) {
         setStatus("idle");
         setError(MIC_ERRORS[(e as DOMException).name] ?? "마이크를 사용할 수 없어요.");

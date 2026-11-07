@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import type { Lesson } from "@/lib/types";
+import type { Lesson, RoomBookmarks } from "@/lib/types";
 import RoomSkeleton from "./RoomSkeleton";
 
 // The practice room depends on browser-only APIs (microphone, speech
@@ -11,6 +11,14 @@ const ShadowingRoom = dynamic(() => import("./ShadowingRoom"), {
   loading: () => <RoomSkeleton />,
 });
 
-export default function RoomLoader({ lesson, canTranslate }: { lesson: Lesson; canTranslate: boolean }) {
-  return <ShadowingRoom lesson={lesson} canTranslate={canTranslate} />;
+type Props = {
+  lesson: Lesson;
+  canTranslate: boolean;
+  bookmarks: RoomBookmarks;
+  /** Sentence to open at instead of where practice last stopped. */
+  startAt: number | null;
+};
+
+export default function RoomLoader(props: Props) {
+  return <ShadowingRoom {...props} />;
 }

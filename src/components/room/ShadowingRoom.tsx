@@ -1,8 +1,11 @@
 "use client";
 
-import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
+import { useEffect, useEffectEvent, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
+  BookmarkIcon,
   ChevronDownIcon,
+  CloseIcon,
   CompareIcon,
   EyeIcon,
   EyeOffIcon,
@@ -24,14 +27,18 @@ import {
   saveSettings,
   touchRecent,
   type PracticeMode,
+  type RepeatCount,
+  type RepeatGap,
+  type RepeatOrder,
   type Settings,
   type WaitMode,
 } from "@/lib/progress";
+import { bookmarkRevision, saveBookmark, subscribeBookmarks, withLocalChanges } from "@/lib/bookmarks-client";
 import { scoreAttempt, scoreTone, type Attempt } from "@/lib/score";
 import { pendingAiLines } from "@/lib/translation-state";
-import type { Lesson } from "@/lib/types";
+import type { Lesson, RoomBookmarks } from "@/lib/types";
 import { MediaPlayer, YouTubePlayer, type PlayerHandle } from "./players";
-import { useKoreanSpeech } from "./useKoreanSpeech";
+import { useKoreanSpeech, type SpeechError } from "./useKoreanSpeech";
 import { speechRecognitionSupported, useRecorder } from "./useRecorder";
 
 type Try = {
@@ -40,6 +47,15 @@ type Try = {
   heard: string;
   recognitionError: string | null;
 };
+
+/** One language of a repetition: the video's English, or the Korean read aloud. */
+type Part = "en" | "ko";
+
+/**
+ * A repeat run on one sentence: which repetition it's on (1-based), how many of that
+ * repetition's parts have started, and whether the pause before the next part was taken.
+ */
+type Repeat = { index: number; round: number; step: number; rested: boolean };
 
 /** Mutable playback state read by the 40ms tick (kept out of React state). */
 type Engine = {
@@ -54,6 +70,8 @@ type Engine = {
   waitTimer: ReturnType<typeof setTimeout> | undefined;
   /** When we last paused programmatically (the player reports state late). */
   pausedAt: number;
+  /** The repeat run in progress, if any. */
+  repeat: Repeat | null;
 };
 
 type TranslateState = { status: "idle" | "working" | "error"; message?: string };
@@ -68,12 +86,69 @@ const MODES: { value: PracticeMode; label: string }[] = [
 
 const NO_KOREAN = "한글 해석이 없는 영상이에요";
 
+const SPEECH_ERRORS: Record<SpeechError, string> = {
+  blocked: "음성이 재생되지 않았어요. 🔊 버튼을 눌러 다시 들어 보세요.",
+  unavailable: "이 기기에서 한국어 음성을 쓸 수 없어요. 기기 설정에서 한국어 음성(TTS)을 내려받아 주세요.",
+  busy: "다른 소리가 재생 중이라 읽지 못했어요. 잠시 후 🔊 버튼을 다시 눌러 주세요.",
+  failed: "한국어 음성을 재생하지 못했어요. 🔊 버튼을 다시 눌러 주세요.",
+};
+
 const WAIT_MODES: { value: WaitMode; label: string; hint: string }[] = [
   { value: "manual", label: "문장마다 멈춤", hint: "한 문장을 듣고 멈춰요. 따라 말한 뒤 직접 넘어가요." },
   { value: "auto1", label: "자동 넘김", hint: "문장 길이만큼 기다렸다가 다음 문장을 재생해요." },
   { value: "auto15", label: "자동 넘김 (여유)", hint: "문장 길이의 1.5배만큼 기다려요." },
   { value: "continuous", label: "이어서 재생", hint: "멈추지 않고 영상처럼 이어서 들어요." },
 ];
+
+const REPEAT_COUNTS: { value: RepeatCount; label: string }[] = [
+  { value: 1, label: "1번" },
+  { value: 2, label: "2번" },
+  { value: 3, label: "3번" },
+  { value: 5, label: "5번" },
+  { value: 0, label: "계속" },
+];
+
+const REPEAT_ORDERS: { value: RepeatOrder; label: string; short: string }[] = [
+  { value: "en", label: "영어만", short: "" },
+  { value: "ko", label: "한국어만", short: "한" },
+  { value: "ko-en", label: "한국어 → 영어", short: "한→영" },
+  { value: "en-ko", label: "영어 → 한국어", short: "영→한" },
+];
+
+const REPEAT_GAPS: { value: RepeatGap; label: string }[] = [
+  { value: 0, label: "바로" },
+  { value: 2, label: "2초" },
+  { value: 4, label: "4초" },
+  { value: "fit", label: "문장 길이만큼" },
+];
+
+const REPEAT_PARTS: Record<RepeatOrder, Part[]> = {
+  en: ["en"],
+  ko: ["ko"],
+  "ko-en": ["ko", "en"],
+  "en-ko": ["en", "ko"],
+};
+
+/** Countdown captions: what to do while waiting after each language. */
+const SAY_IT = "지금 따라 말해 보세요";
+const SAY_IN_ENGLISH = "영어로 말해 보세요";
+const RECALL_MEANING = "뜻을 떠올려 보세요";
+
+/** "한국어를 읽어 주고 2초 뒤에 원어민 영어를 들려줘요. 3번 들려준 뒤 멈춰요." */
+function describeRepeat(order: RepeatOrder, count: RepeatCount, gap: RepeatGap, advances: boolean) {
+  const pause = gap === 0 ? "바로" : gap === "fit" ? "문장 길이만큼 기다렸다가" : `${gap}초 뒤에`;
+  const what = {
+    en: "원어민 영어를 들려줘요.",
+    ko: "한국어 해석을 읽어 줘요.",
+    "ko-en": `한국어를 읽어 주고 ${pause} 원어민 영어를 들려줘요.`,
+    "en-ko": `원어민 영어를 들려주고 ${pause} 한국어 해석을 읽어 줘요.`,
+  }[order];
+  const times =
+    count === 0
+      ? "반복을 끌 때까지 계속 되풀이해요."
+      : `${count === 1 ? "한 번" : `${count}번`} 들려준 뒤 ${advances ? "다음 문장으로 넘어가요" : "멈춰요"}.`;
+  return `${what} ${times}`;
+}
 
 const RECOGNITION_ERRORS: Record<string, string> = {
   network: "음성 인식 서버에 연결하지 못했어요. 인터넷 연결을 확인해 주세요.",
@@ -119,7 +194,15 @@ async function requestTranslation(lessonId: string): Promise<Translation> {
 const translatedState = ({ pending }: Translation): TranslateState =>
   pending > 0 ? { status: "error", message: `${pending}문장은 번역하지 못했어요.` } : { status: "idle" };
 
-export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson; canTranslate: boolean }) {
+type RoomProps = {
+  lesson: Lesson;
+  canTranslate: boolean;
+  bookmarks: RoomBookmarks;
+  /** Sentence to open at instead of where practice last stopped. */
+  startAt: number | null;
+};
+
+export default function ShadowingRoom({ lesson, canTranslate, bookmarks, startAt }: RoomProps) {
   const { sentences } = lesson;
   const total = sentences.length;
   const needsTranslation = canTranslate && pendingAiLines(lesson).length > 0;
@@ -138,6 +221,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     afterEnd: null,
     waitTimer: undefined,
     pausedAt: 0,
+    repeat: null,
   });
 
   const [ready, setReady] = useState(false);
@@ -145,11 +229,25 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [best, setBest] = useState<Record<number, number>>(() => loadProgress(lesson.id).best);
   const [bestSpeak, setBestSpeak] = useState<Record<number, number>>(() => loadProgress(lesson.id).bestSpeak);
-  const [current, setCurrent] = useState(() =>
-    Math.min(Math.max(0, loadProgress(lesson.id).last || 0), total - 1),
-  );
+  // Bookmarked sentences: what the server sent, plus changes made in this tab since — also
+  // ones made on the "북마크" page while this room waited in the back history.
+  useSyncExternalStore(subscribeBookmarks, bookmarkRevision, bookmarkRevision);
+  const marked = withLocalChanges(lesson.id, bookmarks.indexes ?? []);
+  for (const i of marked) if (!(i < total)) marked.delete(i);
+  /** "북마크만": go through the bookmarked sentences only. */
+  const [onlyMarked, setOnlyMarked] = useState(bookmarks.only);
+  const [bookmarkError, setBookmarkError] = useState<string | null>(null);
+  const [current, setCurrent] = useState(() => {
+    if (startAt != null) return startAt;
+    // Bookmarked-only practice starts from the first bookmarked sentence.
+    if (bookmarks.only && marked.size > 0) return Math.min(...marked);
+    return Math.min(Math.max(0, loadProgress(lesson.id).last || 0), total - 1);
+  });
   const [playing, setPlaying] = useState(false);
-  const [wait, setWait] = useState<{ key: number; ms: number } | null>(null);
+  const [wait, setWait] = useState<{ key: number; ms: number; label: string } | null>(null);
+  /** The repetition in progress (1-based), 0 when no repeat run is going. */
+  const [repeatRound, setRepeatRound] = useState(0);
+  const [repeatOpen, setRepeatOpen] = useState(false);
   const [tries, setTries] = useState<Record<string, Try>>({});
   const [revealed, setRevealed] = useState<number | null>(null);
   /** Sentences whose English answer is open this session (Korean → English mode). */
@@ -168,12 +266,55 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   /** Either Korean → English mode: the Korean is read ("speak") or heard ("listen"). */
   const speak = settings.mode !== "shadow";
   const listening = settings.mode === "listen";
-  /** Korean → English mode always goes sentence by sentence, whatever the wait mode says. */
-  const continuousPlay = !speak && settings.waitMode === "continuous";
+  /** Bookmarked-only practice is on, and there's something to practice. */
+  const filtered = onlyMarked && marked.size > 0;
+  /**
+   * Korean → English mode always goes sentence by sentence, whatever the wait mode says.
+   * So does bookmarked-only practice: following the video would play the sentences between.
+   */
+  const continuousPlay = !speak && settings.waitMode === "continuous" && !filtered;
   const update = (patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch }));
   const koOf = (i: number) => koAi?.[i] || sentences[i].ko || "";
   const hasKorean = koAi ? koAi.some(Boolean) : sentences.some((s) => s.ko);
   const tryKey = (i: number) => `${settings.mode}:${i}`;
+  /** The video is playing, or a repeat run is going (also while it reads Korean or pauses). */
+  const running = playing || repeatRound > 0;
+
+  /* --------------------------------- bookmarks ------------------------------- */
+
+  const canBookmark = bookmarks.indexes !== null;
+  const markedList = [...marked].sort((a, b) => a - b);
+  /** The sentence after `i` (null at the end) — only bookmarked ones in "북마크만" practice. */
+  const nextOf = (i: number): number | null =>
+    filtered ? (markedList.find((m) => m > i) ?? null) : i + 1 < total ? i + 1 : null;
+  /** The sentence before `i` (null at the start) — only bookmarked ones in "북마크만" practice. */
+  const prevOf = (i: number): number | null =>
+    filtered ? (markedList.findLast((m) => m < i) ?? null) : i > 0 ? i - 1 : null;
+
+  const toggleBookmark = (i: number) => {
+    if (!canBookmark) return;
+    const on = !marked.has(i);
+    // Removing the last bookmark ends bookmarked-only practice rather than leaving an empty list.
+    if (!on && marked.size === 1) setOnlyMarked(false);
+    setBookmarkError(null);
+    // Shows at once; the store undoes it if saving fails.
+    saveBookmark(lesson.id, i, on).catch((e: Error) => setBookmarkError(e.message));
+  };
+
+  /** Switches bookmarked-only practice on or off; on, it moves to a bookmarked sentence. */
+  const showOnlyMarked = (only: boolean) => {
+    if (only && markedList.length === 0) return;
+    setOnlyMarked(only);
+    if (!only || marked.has(current) || recorder.status !== "idle") return;
+    const target = markedList.find((m) => m > current) ?? markedList[0];
+    // Moving there shouldn't start the video; Korean → English modes move as usual.
+    if (speak) goTo(target);
+    else {
+      pause();
+      stopMine();
+      setCurrent(target);
+    }
+  };
 
   /* ------------------------------ timing helpers ----------------------------- */
 
@@ -202,6 +343,24 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     setWait(null);
   };
 
+  /** Shows a countdown (time to speak), then runs `then`. */
+  const holdThen = (ms: number, label: string, then: () => void) => {
+    clearWait();
+    setWait({ key: Date.now(), ms, label });
+    engine.current.waitTimer = setTimeout(() => {
+      engine.current.waitTimer = undefined;
+      setWait(null);
+      then();
+    }, ms);
+  };
+
+  /** Ends the repeat run in progress (repeating itself stays switched on). */
+  const endRepeat = () => {
+    if (!engine.current.repeat) return;
+    engine.current.repeat = null;
+    setRepeatRound(0);
+  };
+
   const stopMine = () => {
     myAudioRef.current?.pause();
     myAudioRef.current = null;
@@ -219,7 +378,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     koSpeech.stop();
   };
 
-  const play = (i: number, opts: { once?: boolean; afterEnd?: () => void } = {}) => {
+  /** Plays one sentence of the video; `afterEnd` runs when it ends, instead of the wait mode. */
+  const playSegment = (i: number, opts: { once?: boolean; afterEnd?: () => void } = {}) => {
     const p = playerRef.current;
     if (!p || !ready || recorder.status !== "idle") return;
     const idx = clamp(i);
@@ -228,7 +388,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     stopKorean();
     const e = engine.current;
     e.once = Boolean(opts.once);
-    e.mode = !e.once && continuousPlay ? "continuous" : "segment";
+    e.mode = !e.once && !opts.afterEnd && continuousPlay ? "continuous" : "segment";
     e.index = idx;
     e.armed = false;
     e.armDeadline = performance.now() + 1500;
@@ -238,19 +398,127 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     p.play();
   };
 
+  /** Plays a sentence — through the repeat settings while repeating is on. */
+  const play = (i: number) => {
+    if (settings.loop) return startRepeat(i);
+    endRepeat();
+    playSegment(i);
+  };
+
+  /** Plays a sentence's English once, whatever the repeat and wait settings say. */
+  const playOnce = (i: number, afterEnd?: () => void) => {
+    endRepeat();
+    playSegment(i, { once: true, afterEnd });
+  };
+
   const pause = () => {
     clearWait();
     const e = engine.current;
+    if (e.repeat) {
+      endRepeat();
+      koSpeech.stop();
+    }
     e.mode = "idle";
     e.afterEnd = null;
     e.pausedAt = performance.now();
     playerRef.current?.pause();
   };
 
+  /* ------------------------------- repeat runs ------------------------------- */
+
+  const spokenMs = (i: number) => ((sentences[i].end - sentences[i].start) / settings.rate) * 1000;
+
+  /** Time to say a sentence after hearing it — none when playing straight through. */
+  const sayTimeMs = (i: number) => {
+    // "이어서 재생" (in bookmarked-only practice: one bookmarked sentence straight after another).
+    if (!speak && settings.waitMode === "continuous") return 0;
+    const factor = !speak && settings.waitMode === "auto15" ? 1.5 : 1;
+    return Math.max(1200, spokenMs(i) * factor);
+  };
+
+  /** The pause between the two languages of one repetition. */
+  const gapMs = (i: number) => {
+    const gap = settings.repeatGap;
+    return gap === "fit" ? Math.max(2000, spokenMs(i) * 1.5 + 1000) : gap * 1000;
+  };
+
+  /** One repetition's parts — just the English where there's no Korean to read aloud. */
+  const partsFor = (i: number): Part[] =>
+    koOf(i) && koSpeech.supported ? REPEAT_PARTS[settings.repeatOrder] : ["en"];
+
+  /** Starts repeating a sentence from its first repetition. */
+  const startRepeat = (i: number) => {
+    if (!ready || recorder.status !== "idle") return;
+    const idx = clamp(i);
+    pause();
+    stopMine();
+    stopKorean();
+    engine.current.repeat = { index: idx, round: 1, step: 0, rested: false };
+    setRepeatRound(1);
+    setCurrent(idx);
+    runRepeat();
+  };
+
+  // Video ends, speech ends and timers outlive the render that started them: they carry
+  // the run on through this ref, so it follows the latest settings (e.g. a new count).
+  const repeatLatest = useRef<(() => void) | null>(null);
+  const resumeRepeat = () => repeatLatest.current?.();
+
+  /** Plays the run's next part — or, after the last one, the next repetition or sentence. */
+  const runRepeat = () => {
+    const run = engine.current.repeat;
+    if (!run) return;
+    const i = run.index;
+    const parts = partsFor(i);
+
+    if (run.step > 0 && run.step < parts.length && !run.rested) {
+      run.rested = true;
+      const gap = gapMs(i);
+      if (gap > 0) return holdThen(gap, parts[run.step - 1] === "ko" ? SAY_IN_ENGLISH : RECALL_MEANING, resumeRepeat);
+    }
+
+    if (run.step < parts.length) {
+      const part = parts[run.step];
+      run.step += 1;
+      run.rested = false;
+      const done = () => {
+        if (engine.current.repeat === run) resumeRepeat();
+      };
+      if (part === "en") playSegment(i, { afterEnd: done });
+      else {
+        stopMine();
+        // A voice that won't play would fail the same way every time round: stop and say so.
+        koSpeech.speak(koOf(i), (ok) => (ok ? done() : endRepeat()));
+      }
+      return;
+    }
+
+    // This repetition is over: repeat the sentence, move on (as the wait mode does), or stop.
+    const count = settings.repeatCount;
+    const following = !speak && settings.waitMode !== "manual" ? nextOf(i) : null;
+    const next: Repeat | null =
+      count === 0 || run.round < count
+        ? { index: i, round: run.round + 1, step: 0, rested: false }
+        : following !== null
+          ? { index: following, round: 1, step: 0, rested: false }
+          : null;
+    if (!next) return endRepeat();
+    const go = () => {
+      if (engine.current.repeat !== run) return;
+      engine.current.repeat = next;
+      setRepeatRound(next.round);
+      setCurrent(next.index);
+      resumeRepeat();
+    };
+    const ms = sayTimeMs(i);
+    if (ms > 0) holdThen(ms, parts[parts.length - 1] === "ko" ? SAY_IN_ENGLISH : SAY_IT, go);
+    else go();
+  };
+
   /** Reads a sentence's Korean aloud — or, while it isn't ready yet, as soon as it is. */
   const readKorean = (i: number) => {
     const text = koOf(i);
-    if (!text || !koSpeech.voice) {
+    if (!text || !koSpeech.supported) {
       pendingRead.current = i;
       return;
     }
@@ -270,9 +538,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const goTo = (i: number) => {
     if (!speak) return play(i);
     if (recorder.status !== "idle") return;
+    const idx = clamp(i);
+    // Repeating that starts from the Korean doesn't give the answer away: keep repeating there.
+    if (settings.loop && partsFor(idx)[0] === "ko") return startRepeat(idx);
     pause();
     stopMine();
-    const idx = clamp(i);
     setCurrent(idx);
     if (listening) readKorean(idx);
     else stopKorean();
@@ -308,18 +578,31 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   const toggleLoop = () => {
     const loop = !settings.loop;
     update({ loop });
-    if (loop && !playing && !wait) play(current);
-    else if (!loop && (speak || settings.waitMode === "manual")) clearWait();
+    const e = engine.current;
+    if (loop) {
+      // Already playing: hold this sentence — the run takes over where it ends.
+      if (e.mode === "continuous") e.mode = "segment";
+      else if (!playing && !wait) startRepeat(current);
+    } else if (e.repeat) {
+      // Let what's playing finish, then carry on as without repeating.
+      endRepeat();
+      e.afterEnd = null;
+      clearWait();
+    } else if (speak || settings.waitMode === "manual") clearWait();
   };
 
   // Timers outlive the render that created them; route them through a ref
   // so they act on the latest settings (e.g. loop switched off mid-countdown).
   const afterWaitLatest = useRef<((i: number) => void) | null>(null);
   useEffect(() => {
+    repeatLatest.current = runRepeat;
     afterWaitLatest.current = (i) => {
       if (settings.loop) play(i);
       // Never run on to the next sentence in Korean → English mode: its audio is the answer.
-      else if (!speak && settings.waitMode !== "manual" && i + 1 < total) play(i + 1);
+      else if (!speak && settings.waitMode !== "manual") {
+        const next = nextOf(i);
+        if (next !== null) play(next);
+      }
     };
   });
 
@@ -331,19 +614,21 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     const after = e.afterEnd;
     e.afterEnd = null;
     if (after) return after();
-    if (e.once || continuousPlay) return;
+    if (e.once) return;
+    // Repeating was switched on mid-sentence, or playback was started from the video's own
+    // controls: carry on as a repeat run that has just played this sentence's English.
+    if (settings.loop) {
+      e.repeat = { index: i, round: 1, step: partsFor(i).indexOf("en") + 1, rested: false };
+      setRepeatRound(1);
+      return runRepeat();
+    }
+    if (continuousPlay) return;
     // "문장마다 멈춤" stops here, and so does Korean → English mode (each sentence's audio
-    // is its answer) — unless looping, which replays after a pause to speak in.
-    if (!settings.loop && (speak || settings.waitMode === "manual" || i + 1 >= total)) return;
-
-    const factor = !speak && settings.waitMode === "auto15" ? 1.5 : 1;
-    const spoken = (sentences[i].end - sentences[i].start) / settings.rate;
-    const ms = Math.max(1200, spoken * factor * 1000);
-    setWait({ key: Date.now(), ms });
-    e.waitTimer = setTimeout(() => {
-      setWait(null);
-      afterWaitLatest.current?.(i);
-    }, ms);
+    // is its answer).
+    if (speak || settings.waitMode === "manual" || nextOf(i) === null) return;
+    const ms = sayTimeMs(i);
+    if (ms > 0) holdThen(ms, SAY_IT, () => afterWaitLatest.current?.(i));
+    else afterWaitLatest.current?.(i);
   };
 
   const onTick = useEffectEvent(() => {
@@ -362,9 +647,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
       let j = indexAt(t);
       if (t >= endOf(j) - 0.1 && j < total - 1) j += 1;
       clearWait();
+      endRepeat();
       stopKorean();
       e.once = false;
-      e.mode = continuousPlay ? "continuous" : "segment";
+      // While repeating, stop at the sentence's end: the run picks it up from there.
+      e.mode = continuousPlay && !settings.loop ? "continuous" : "segment";
       e.index = j;
       e.armed = true;
       setCurrent(j);
@@ -379,12 +666,6 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     }
 
     if (e.mode === "continuous") {
-      // Looping holds this sentence — the next one often starts right where it
-      // ends, so following `indexAt` would drift onward — unless the learner scrubbed away.
-      if (settings.loop && t > start - 1.5 && t < end + 1.5) {
-        if (t >= end - 0.03) p.seek(start);
-        return;
-      }
       const j = indexAt(t);
       if (j !== e.index) {
         e.index = j;
@@ -394,7 +675,11 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     }
 
     if (t < start - 1.5 || t > end + 1.5) {
-      // The learner scrubbed the timeline.
+      // The learner scrubbed the timeline. A repeat run starts over on the new sentence.
+      if (e.repeat) {
+        endRepeat();
+        e.afterEnd = null;
+      }
       const j = indexAt(t);
       e.index = j;
       setCurrent(j);
@@ -433,12 +718,17 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
   }, [needsTranslation, lesson.id]);
 
   // Listen mode waits for the Korean (AI translation, voice list) before reading it out.
-  const koReady = Boolean(koOf(current) && koSpeech.voice);
+  const koReady = Boolean(koOf(current) && koSpeech.supported);
   const onKoreanReady = useEffectEvent(() => {
-    if (listening && pendingRead.current === current) readKorean(current);
+    if (!listening || pendingRead.current !== current) return;
+    // Browsers won't speak before the first tap on the page; the 🔊 button is right there.
+    if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
+    readKorean(current);
   });
   useEffect(() => {
-    if (koReady) onKoreanReady();
+    if (!koReady) return;
+    const id = setTimeout(onKoreanReady, 0);
+    return () => clearTimeout(id);
   }, [koReady, current]);
 
   const retryTranslation = () => {
@@ -497,7 +787,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 
   const compare = (i: number) => {
     const url = tries[tryKey(i)]?.url;
-    if (url) play(i, { once: true, afterEnd: () => playUrl(url) });
+    if (url) playOnce(i, () => playUrl(url));
   };
 
   const playMine = (i: number) => {
@@ -537,7 +827,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     if (!sentencesOpen || !list || !item) return;
     const top = item.offsetTop - list.clientHeight / 2 + item.clientHeight / 2;
     list.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-  }, [current, sentencesOpen]);
+  }, [current, sentencesOpen, filtered]);
 
   useEffect(() => {
     const e = engine.current;
@@ -556,16 +846,21 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     switch (ev.key) {
       case " ":
         ev.preventDefault();
-        if (playing) pause();
+        if (running) pause();
         else play(current);
         break;
       case "ArrowRight":
         ev.preventDefault();
-        goTo(current + 1);
+        // At the end it replays the last sentence, as before.
+        goTo(nextOf(current) ?? current);
         break;
       case "ArrowLeft":
         ev.preventDefault();
-        goTo(current - 1);
+        goTo(prevOf(current) ?? current);
+        break;
+      case "b":
+      case "B":
+        toggleBookmark(current);
         break;
       case "r":
       case "R":
@@ -617,11 +912,29 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
     .join(" · ");
   const answerVisible = answerShown.has(current);
   const speakUnavailable = !hasKorean && translate.status !== "working";
-  /** No Korean voice on this device: listen mode falls back to showing the text. */
-  const noVoice = koSpeech.voice === null;
+  /** No speech synthesis in this browser: listen mode falls back to showing the text. */
+  const noVoice = !koSpeech.supported;
   /** Listen mode keeps a sentence's Korean hidden until it's opened or answered. */
   const koHiddenAt = (i: number) => listening && !noVoice && koRevealed !== i && !answerShown.has(i);
   const koHidden = koHiddenAt(current);
+  const currentMarked = marked.has(current);
+  /** Where the current sentence sits among the bookmarked ones (1-based; 0 if it isn't one). */
+  const markedPosition = markedList.indexOf(current) + 1;
+  const prevIndex = prevOf(current);
+  const nextIndex = nextOf(current);
+  /** Why the repeat settings can't read Korean aloud here, if they can't. */
+  const repeatKoBlocked = noVoice ? "이 브라우저는 음성 읽기를 지원하지 않아요" : speakUnavailable ? NO_KOREAN : undefined;
+  const repeatOrder = repeatKoBlocked ? "en" : settings.repeatOrder;
+  /** After its last repetition a sentence moves on (as the wait mode does) instead of stopping. */
+  const repeatAdvances = !speak && settings.waitMode !== "manual";
+  const repeatSummary = describeRepeat(repeatOrder, settings.repeatCount, settings.repeatGap, repeatAdvances);
+  const repeatTag =
+    settings.repeatCount === 0
+      ? "∞"
+      : repeatRound > 0
+        ? `${repeatRound}/${settings.repeatCount}`
+        : `${settings.repeatCount}번`;
+  const repeatOrderTag = REPEAT_ORDERS.find((o) => o.value === repeatOrder)?.short;
 
   const englishLine = attempt
     ? attempt.marks.map((m, k) => (
@@ -701,6 +1014,23 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                 문장 <span className="text-ink">{current + 1}</span> / {total}
                 <span className="ml-2 font-normal tabular-nums">{formatTime(sentence.start)}</span>
               </span>
+              {canBookmark && (
+                <button
+                  type="button"
+                  onClick={() => toggleBookmark(current)}
+                  aria-pressed={currentMarked}
+                  aria-label={currentMarked ? "북마크 해제 (B)" : "나중에 연습하게 북마크 (B)"}
+                  title={currentMarked ? "북마크 해제 (B)" : "나중에 연습하게 북마크 (B)"}
+                  className={`inline-flex h-7 items-center gap-1 rounded-full border px-2.5 text-xs font-semibold transition ${
+                    currentMarked
+                      ? "border-accent bg-accent-soft text-accent"
+                      : "border-line text-muted hover:bg-surface-2 hover:text-ink"
+                  }`}
+                >
+                  <BookmarkIcon size={14} filled={currentMarked} />
+                  {currentMarked ? "북마크됨" : "북마크"}
+                </button>
+              )}
               {modeBest[current] != null && (
                 <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${TONE_BG[scoreTone(modeBest[current])]}`}>
                   {speak ? `최고 일치율 ${modeBest[current]}%` : `최고 ${modeBest[current]}점`}
@@ -712,10 +1042,37 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
               onChange={switchMode}
               disabled={{
                 speak: speakUnavailable ? NO_KOREAN : undefined,
-                listen: speakUnavailable ? NO_KOREAN : noVoice ? "이 브라우저에는 한국어 음성이 없어요" : undefined,
+                listen: speakUnavailable ? NO_KOREAN : noVoice ? "이 브라우저는 음성 읽기를 지원하지 않아요" : undefined,
               }}
             />
           </div>
+          {filtered && (
+            <div className="-mt-1 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl bg-accent-soft px-3 py-2 text-xs font-semibold text-accent">
+              <span className="flex items-center gap-1.5">
+                <BookmarkIcon size={14} filled />
+                북마크한 문장만 연습 중
+                {markedPosition > 0 && (
+                  <span className="tabular-nums">
+                    · {markedPosition}/{markedList.length}
+                  </span>
+                )}
+              </span>
+              <span className="ml-auto flex items-center gap-3">
+                {bookmarks.next && (
+                  <Link
+                    href={`/lesson/${bookmarks.next}?only=bookmarks`}
+                    className={nextIndex === null ? "underline" : "font-medium opacity-80 hover:opacity-100"}
+                  >
+                    다음 영상 북마크 →
+                  </Link>
+                )}
+                <button type="button" onClick={() => showOnlyMarked(false)} className="font-medium opacity-80 hover:opacity-100">
+                  모든 문장 보기
+                </button>
+              </span>
+            </div>
+          )}
+          {bookmarkError && <p className="-mt-2 mb-3 text-xs text-bad">{bookmarkError}</p>}
           {translate.status === "working" && (
             <p className="-mt-2 mb-3 flex items-center gap-2 text-xs font-semibold text-muted">
               <span className="h-2 w-2 animate-pulse rounded-full bg-accent" /> AI가 문장별 한글 해석을 만드는 중…
@@ -736,7 +1093,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                 {listening ? "한국어를 듣고 영어로 말해 보세요" : "이 뜻을 영어로 말해 보세요"}
               </p>
               {listening && noVoice && (
-                <p className="mt-1 text-xs text-muted">이 브라우저에는 한국어 음성이 없어 글로 보여 드려요.</p>
+                <p className="mt-1 text-xs text-muted">이 브라우저는 음성 읽기를 지원하지 않아 글로 보여 드려요.</p>
               )}
               {ko ? (
                 <div className="mt-1 flex items-start gap-3">
@@ -744,7 +1101,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                     <button
                       type="button"
                       onClick={toggleKorean}
-                      disabled={!koSpeech.voice || busy}
+                      disabled={busy}
                       aria-pressed={koSpeech.speaking}
                       aria-label={koSpeech.speaking ? "읽기 멈추기 (K)" : "한국어로 듣기 (K)"}
                       title={koSpeech.speaking ? "읽기 멈추기 (K)" : "한국어로 듣기 (K)"}
@@ -780,6 +1137,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                   {translate.status === "working" ? "한글 해석을 준비하고 있어요…" : "이 문장은 한글 해석이 없어요."}
                 </p>
               )}
+              {koSpeech.error && ko && <p className="mt-2 text-xs text-bad">{SPEECH_ERRORS[koSpeech.error]}</p>}
               {hintShown === current && !answerVisible && (
                 <p className="mt-2 text-lg tracking-wide text-muted" lang="en">
                   {hintFor(sentence.text)}
@@ -816,12 +1174,20 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                 )}
               </div>
               {hasKorean && settings.showKorean && ko && <p className="mt-2 break-keep text-base text-muted">{ko}</p>}
+              {/* Only repeating reads Korean aloud here. */}
+              {koSpeech.error && (
+                <p className="mt-2 text-xs text-bad">
+                  {koSpeech.error === "unavailable"
+                    ? SPEECH_ERRORS.unavailable
+                    : "한국어 음성을 재생하지 못해 반복을 멈췄어요. 듣기 버튼으로 다시 시작하거나 반복 설정을 '영어만'으로 바꿔 보세요."}
+                </p>
+              )}
             </>
           )}
 
           {wait && (
             <div className="mt-4">
-              <div className="mb-1 text-xs font-semibold text-accent">지금 따라 말해 보세요</div>
+              <div className="mb-1 text-xs font-semibold text-accent">{wait.label}</div>
               <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
                 <div
                   key={wait.key}
@@ -834,29 +1200,68 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
 
           {/* Transport */}
           <div className="mt-5 flex flex-wrap items-center gap-2">
-            <IconButton label="이전 문장 (←)" onClick={() => goTo(current - 1)} disabled={!ready || current === 0}>
+            <IconButton
+              label={filtered ? "이전 북마크 문장 (←)" : "이전 문장 (←)"}
+              onClick={() => prevIndex !== null && goTo(prevIndex)}
+              disabled={!ready || prevIndex === null}
+            >
               <PrevIcon />
             </IconButton>
             <button
               type="button"
-              onClick={() => (playing ? pause() : play(current))}
+              onClick={() => (running ? pause() : play(current))}
               disabled={!ready || busy}
               className="inline-flex h-12 items-center gap-2 rounded-full bg-ink px-5 font-semibold text-bg transition hover:opacity-90 disabled:opacity-40"
-              aria-label={playing ? "일시정지 (Space)" : "문장 듣기 (Space)"}
+              aria-label={running ? "일시정지 (Space)" : "문장 듣기 (Space)"}
             >
-              {playing ? <PauseIcon /> : <PlayIcon />}
-              {playing ? "일시정지" : "듣기"}
+              {running ? <PauseIcon /> : <PlayIcon />}
+              {running ? "일시정지" : "듣기"}
             </button>
-            <IconButton label="다음 문장 (→)" onClick={() => goTo(current + 1)} disabled={!ready || current >= total - 1}>
+            <IconButton
+              label={filtered ? "다음 북마크 문장 (→)" : "다음 문장 (→)"}
+              onClick={() => nextIndex !== null && goTo(nextIndex)}
+              disabled={!ready || nextIndex === null}
+            >
               <NextIcon />
             </IconButton>
-            <IconButton
-              label={settings.loop ? "반복 끄기 (L)" : "이 문장 반복 듣기 (L)"}
-              onClick={toggleLoop}
-              active={settings.loop}
+            {/* Repeat: the left half switches it on/off, the chevron opens its settings. */}
+            <div
+              className={`inline-flex h-12 overflow-hidden rounded-full border transition ${
+                settings.loop ? "border-accent bg-accent-soft text-accent" : "border-line"
+              }`}
             >
-              <LoopIcon />
-            </IconButton>
+              <button
+                type="button"
+                onClick={toggleLoop}
+                aria-pressed={settings.loop}
+                aria-label={settings.loop ? `반복 끄기 (L) — ${repeatSummary}` : "이 문장 반복 듣기 (L)"}
+                title={settings.loop ? `반복 끄기 (L)\n${repeatSummary}` : "이 문장 반복 듣기 (L)"}
+                className={`inline-flex items-center gap-1.5 pl-3.5 pr-2.5 transition ${
+                  settings.loop ? "hover:bg-accent/10" : "hover:bg-surface-2"
+                }`}
+              >
+                <LoopIcon />
+                {settings.loop && (
+                  <span className="text-xs font-bold tabular-nums">
+                    {repeatOrderTag && <span className="mr-1 hidden sm:inline">{repeatOrderTag}</span>}
+                    {repeatTag}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setRepeatOpen((open) => !open)}
+                aria-expanded={repeatOpen}
+                aria-controls="repeat-options"
+                aria-label="반복 설정"
+                title="반복 설정"
+                className={`inline-flex w-8 items-center justify-center border-l transition ${
+                  settings.loop ? "border-accent/30 hover:bg-accent/10" : "border-line hover:bg-surface-2"
+                }`}
+              >
+                <ChevronDownIcon size={16} className={`transition-transform ${repeatOpen ? "rotate-180" : ""}`} />
+              </button>
+            </div>
             {speak && (
               <>
                 <IconButton
@@ -877,6 +1282,20 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
             )}
             {recordButton}
           </div>
+
+          {repeatOpen && (
+            <RepeatPanel
+              on={settings.loop}
+              onToggle={toggleLoop}
+              order={repeatOrder}
+              count={settings.repeatCount}
+              gap={settings.repeatGap}
+              koBlocked={repeatKoBlocked}
+              summary={repeatSummary}
+              onChange={update}
+              onClose={() => setRepeatOpen(false)}
+            />
+          )}
 
           {/* Result */}
           {(recording || attemptState || recorder.error) && (
@@ -939,7 +1358,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                       </>
                     )}
                     {!speak && attemptState?.url && (
-                      <SmallButton onClick={() => play(current, { once: true })} disabled={!ready}>
+                      <SmallButton onClick={() => playOnce(current)} disabled={!ready}>
                         <ReplayIcon size={16} /> 원본 다시 듣기
                       </SmallButton>
                     )}
@@ -977,7 +1396,8 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                   <select
                     value={settings.waitMode}
                     onChange={(e) => {
-                      clearWait();
+                      // A repeat run reads the new mode when it gets there; a plain countdown is dropped.
+                      if (!engine.current.repeat) clearWait();
                       update({ waitMode: e.target.value as WaitMode });
                     }}
                     className="h-9 w-full rounded-lg border border-line bg-surface px-2 font-medium"
@@ -1028,10 +1448,12 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
                   <>
                     단축키: <Kbd>R</Kbd> 영어로 말하기 · <Kbd>K</Kbd> 한국어 듣기 · <Kbd>H</Kbd> 힌트 ·{" "}
                     <Kbd>Space</Kbd> 원어민 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>L</Kbd> 반복
+                    {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
                   </>
                 ) : (
                   <>
                     단축키: <Kbd>Space</Kbd> 듣기/멈춤 · <Kbd>←</Kbd> <Kbd>→</Kbd> 이전/다음 · <Kbd>R</Kbd> 녹음 · <Kbd>L</Kbd> 반복
+                    {canBookmark && <> · <Kbd>B</Kbd> 북마크</>}
                   </>
                 )}
                 <span className="block sm:ml-1 sm:inline">(영상을 클릭한 뒤에는 영상 바깥을 한 번 클릭하면 단축키가 동작해요)</span>
@@ -1052,7 +1474,7 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
               aria-controls="room-sentences"
               className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-surface-2"
             >
-              <span className="font-bold">전체 문장</span>
+              <span className="font-bold">{filtered ? "북마크한 문장" : "전체 문장"}</span>
               <span className="flex items-center gap-2 text-xs text-muted">
                 <span>
                   연습 {practicedCount}/{total}
@@ -1062,26 +1484,68 @@ export default function ShadowingRoom({ lesson, canTranslate }: { lesson: Lesson
               </span>
             </button>
           </h2>
+          {sentencesOpen && canBookmark && (
+            <div className="flex gap-1 border-t border-line px-2 pt-2" role="tablist" aria-label="문장 보기">
+              {[
+                { only: false, label: "전체", count: total },
+                { only: true, label: "북마크", count: markedList.length },
+              ].map((tab) => (
+                <button
+                  key={tab.label}
+                  type="button"
+                  role="tab"
+                  aria-selected={filtered === tab.only}
+                  onClick={() => showOnlyMarked(tab.only)}
+                  disabled={tab.only && tab.count === 0}
+                  title={tab.only && tab.count === 0 ? "북마크한 문장이 아직 없어요" : undefined}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition disabled:opacity-40 ${
+                    filtered === tab.only ? "bg-surface-2 text-ink" : "text-muted hover:text-ink"
+                  }`}
+                >
+                  {tab.only && <BookmarkIcon size={13} filled={filtered} />}
+                  {tab.label} <span className="tabular-nums">{tab.count}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {sentencesOpen && (
             <ol
               id="room-sentences"
               ref={listRef}
-              className="relative max-h-[55vh] overflow-y-auto border-t border-line p-2 lg:max-h-[calc(100dvh-13rem)]"
+              className={`relative max-h-[55vh] overflow-y-auto p-2 lg:max-h-[calc(100dvh-13rem)] ${
+                canBookmark ? "" : "border-t border-line"
+              }`}
             >
               {sentences.map((s, i) => {
+                const isMarked = marked.has(i);
+                if (filtered && !isMarked) return null;
                 const score = modeBest[i];
                 const active = i === current;
                 const lineKo = koOf(i);
                 const englishOpen = !speak || answerShown.has(i);
                 return (
-                  <li key={i} data-index={i}>
+                  <li key={i} data-index={i} className="relative">
+                    {canBookmark && (
+                      <button
+                        type="button"
+                        onClick={() => toggleBookmark(i)}
+                        aria-pressed={isMarked}
+                        aria-label={`${i + 1}번 문장 ${isMarked ? "북마크 해제" : "북마크"}`}
+                        title={isMarked ? "북마크 해제" : "북마크"}
+                        className={`absolute right-1 top-1.5 z-10 inline-flex size-8 items-center justify-center rounded-full transition hover:bg-surface hover:opacity-100 ${
+                          isMarked ? "text-accent" : `text-muted ${active ? "opacity-70" : "opacity-30"}`
+                        }`}
+                      >
+                        <BookmarkIcon size={16} filled={isMarked} />
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => goTo(i)}
                       disabled={!ready}
-                      className={`flex w-full gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition ${
-                        active ? "bg-accent-soft" : "hover:bg-surface-2"
-                      }`}
+                      className={`flex w-full gap-3 rounded-xl py-2.5 pl-3 text-left text-sm transition ${
+                        canBookmark ? "pr-10" : "pr-3"
+                      } ${active ? "bg-accent-soft" : "hover:bg-surface-2"}`}
                     >
                       <span className={`w-6 shrink-0 pt-0.5 text-xs tabular-nums ${active ? "font-bold text-accent" : "text-muted"}`}>
                         {i + 1}
@@ -1240,26 +1704,116 @@ function Segmented<T extends string | number>({
   options,
   value,
   onChange,
+  label,
 }: {
-  options: { value: T; label: string }[];
+  /** `disabled`: why the option can't be picked. */
+  options: { value: T; label: string; disabled?: string }[];
   value: T;
   onChange: (v: T) => void;
+  label?: string;
 }) {
   return (
-    <div className="inline-flex flex-wrap rounded-lg bg-surface-2 p-1">
+    <div className="inline-flex flex-wrap rounded-lg bg-surface-2 p-1" role="group" aria-label={label}>
       {options.map((o) => (
         <button
           key={String(o.value)}
           type="button"
           onClick={() => onChange(o.value)}
+          disabled={Boolean(o.disabled)}
+          title={o.disabled}
           aria-pressed={o.value === value}
-          className={`h-7 rounded-md px-2.5 text-xs font-semibold transition ${
-            o.value === value ? "bg-surface text-ink shadow-sm" : "text-muted hover:text-ink"
+          className={`h-7 rounded-md px-2.5 text-xs font-semibold transition disabled:opacity-40 ${
+            o.value === value ? "bg-surface text-ink shadow-sm" : "text-muted enabled:hover:text-ink"
           }`}
         >
           {o.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+function RepeatPanel({
+  on,
+  onToggle,
+  order,
+  count,
+  gap,
+  koBlocked,
+  summary,
+  onChange,
+  onClose,
+}: {
+  on: boolean;
+  onToggle: () => void;
+  order: RepeatOrder;
+  count: RepeatCount;
+  gap: RepeatGap;
+  /** Why Korean can't be read aloud here, if it can't. */
+  koBlocked?: string;
+  summary: string;
+  onChange: (patch: Partial<Settings>) => void;
+  onClose: () => void;
+}) {
+  const bothLanguages = order === "ko-en" || order === "en-ko";
+  return (
+    <div id="repeat-options" className="mt-4 rounded-xl border border-line p-4 text-sm">
+      <div className="mb-3 flex items-center gap-3">
+        <span className="font-semibold">반복 설정</span>
+        <Toggle checked={on} onChange={onToggle}>
+          반복 켜기
+        </Toggle>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="반복 설정 닫기"
+          title="닫기"
+          className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-full text-muted transition hover:bg-surface-2 hover:text-ink"
+        >
+          <CloseIcon size={16} />
+        </button>
+      </div>
+      <div className="space-y-3">
+        <RepeatRow label="반복 횟수">
+          <Segmented
+            label="반복 횟수"
+            options={REPEAT_COUNTS}
+            value={count}
+            onChange={(repeatCount) => onChange({ repeatCount })}
+          />
+        </RepeatRow>
+        <RepeatRow label="읽어 주기">
+          <Segmented
+            label="읽어 주기"
+            options={REPEAT_ORDERS.map((o) => ({ ...o, disabled: o.value === "en" ? undefined : koBlocked }))}
+            value={order}
+            onChange={(repeatOrder) => onChange({ repeatOrder })}
+          />
+        </RepeatRow>
+        {bothLanguages && (
+          <RepeatRow label="사이 간격">
+            <Segmented
+              label="사이 간격"
+              options={REPEAT_GAPS}
+              value={gap}
+              onChange={(repeatGap) => onChange({ repeatGap })}
+            />
+          </RepeatRow>
+        )}
+      </div>
+      <p className="mt-3 break-keep text-xs text-muted">
+        {koBlocked && <>{koBlocked}. 영어만 반복해요. </>}
+        {summary}
+      </p>
+    </div>
+  );
+}
+
+function RepeatRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+      <span className="shrink-0 text-xs font-semibold text-muted sm:w-16">{label}</span>
+      {children}
     </div>
   );
 }
